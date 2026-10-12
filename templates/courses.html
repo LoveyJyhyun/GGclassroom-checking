@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your courses</h1>
+{% if not courses %}<p class="muted">No active courses where you are a teacher.</p>{% endif %}
+<ul class="cards">
+  {% for c in courses %}
+  <li><a href="{{ url_for('course', course_id=c.id) }}">
+    <strong>{{ c.name }}</strong>
+    {% if c.section %}<span class="muted">{{ c.section }}</span>{% endif %}
+  </a></li>
+  {% endfor %}
+</ul>
+{% endblock %}

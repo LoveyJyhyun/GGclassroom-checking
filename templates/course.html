@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ course.name }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="{{ url_for('index') }}">Courses</a> / {{ course.name }}</nav>{% endblock %}
+{% block content %}
+<div class="bar">
+  <h1>{{ course.name }}</h1>
+  <div>
+    {% if request.args.get('filter') == 'missing' %}
+      <a href="{{ url_for('course', course_id=course.id) }}">Show all students</a>
+    {% else %}
+      <a href="{{ url_for('course', course_id=course.id, filter='missing') }}">Only students with missing work</a>
+    {% endif %}
+    <a class="button" href="{{ url_for('export_csv', course_id=course.id) }}">Export CSV</a>
+  </div>
+</div>
+<p class="muted">{{ student_count }} students · {{ summaries|length }} assignments</p>
+
+{% if summaries %}
+<div class="scroll">
+<table class="matrix">
+  <thead>
+    <tr>
+      <th class="sticky">Student</th><th>Missing</th>
+      {% for s in summaries %}
+      <th class="work"><a href="{{ url_for('assignment', course_id=course.id, work_id=s.work.id) }}" title="{{ s.work.title }}">{{ s.work.title|truncate(28) }}</a>
+        <div class="muted small">{{ s.done }}/{{ s.total }} in{% if s.due %} · due {{ s.due.strftime('%b %d') }}{% endif %}</div></th>
+      {% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="sticky">{{ r.student.profile.name.fullName }}</td>
+      <td class="{{ 'bad' if r.missing else '' }}">{{ r.missing }}</td>
+      {% for c in r.cells %}
+      <td class="cell {{ c.status or 'none' }}" title="{{ labels[c.status] if c.status else 'No submission' }}">
+        {% if c.status %}{% if c.grade is not none %}{{ '%g'|format(c.grade) }}{% else %}{{ labels[c.status] }}{% endif %}{% endif %}
+      </td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}<p>No published assignments.</p>{% endif %}
+{% endblock %}

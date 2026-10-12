@@ -1,0 +1,58 @@
+# Usage:
+#   cp .env.example .env            # then edit FLASK_SECRET_KEY
+#   mkdir -p secrets && cp ~/Downloads/client_secret_*.json secrets/client_secret.json
+#   docker compose up -d
+#   docker compose exec ollama ollama pull qwen2.5:7b
+#   docker compose exec ollama ollama pull nomic-embed-text
+#   open http://localhost:8080
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+      - "8765:8765"            # only used by the CLI's Google sign-in (OAUTH_PORT)
+    env_file: .env
+    environment:
+      # These override .env so paths point inside the container.
+      GOOGLE_CLIENT_SECRETS: /secrets/client_secret.json
+      GOOGLE_TOKEN_FILE: /data/token.json
+      REPORTS_DIR: /data/reports
+      OLLAMA_URL: http://ollama:11434
+      # Use Ollama already running on your computer instead of the container below:
+      # OLLAMA_URL: http://host.docker.internal:11434
+      CODE_RUNNER: docker
+      CODE_WORK_DIR: /tmp/ggc-runs
+      OAUTH_PORT: "8765"
+      OAUTH_NO_BROWSER: "1"
+    volumes:
+      - ./secrets:/secrets:ro
+      - ./data:/data
+      # Lets the app start isolated sandbox containers for student code.
+      # Note: access to the Docker socket is root-equivalent on the host.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Must be the same path on the host and in the container (see CODE_WORK_DIR).
+      - /tmp/ggc-runs:/tmp/ggc-runs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    restart: unless-stopped
+    # NVIDIA GPU (needs nvidia-container-toolkit). Remove the comments to enable:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama:

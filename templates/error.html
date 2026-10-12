@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Google API error</h1>
+<p>{{ error.reason if error.reason else error }}</p>
+<p class="muted">Status {{ error.status_code }}. You may not be a teacher of this course, or the Classroom API may not be enabled for your project.</p>
+<a href="{{ url_for('index') }}">Back to courses</a>
+{% endblock %}

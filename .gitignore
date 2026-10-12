@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+client_secret*.json
+.pytest_cache/
+reports/
+token.json
+secrets/
+data/

@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ student.profile.name.fullName }} · {{ work.title }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="{{ url_for('index') }}">Courses</a> / <a href="{{ url_for('course', course_id=course.id) }}">{{ course.name }}</a> / <a href="{{ url_for('assignment', course_id=course.id, work_id=work.id) }}">{{ work.title }}</a> / {{ student.profile.name.fullName }}</nav>{% endblock %}
+{% block content %}
+<h1>{{ student.profile.name.fullName }}</h1>
+<p><span class="tag {{ status }}">{{ labels[status] }}</span>
+  {% if turned_in_at %}<span class="muted">turned in {{ turned_in_at[:16]|replace('T', ' ') }} UTC</span>{% endif %}
+  {% if grade is not none %} · grade <strong>{{ '%g'|format(grade) }}</strong>{% endif %}
+  · <a href="{{ sub.alternateLink }}" target="_blank" rel="noopener">Open in Classroom</a></p>
+
+{% if answer %}<h2>Answer</h2><pre class="doc">{{ answer }}</pre>{% endif %}
+
+{% for f in files %}
+  <h2><a href="{{ f.url }}" target="_blank" rel="noopener">{{ f.title }}</a>
+    {% if f.text %}<span class="muted small">{{ f.words }} words</span>{% endif %}</h2>
+  {% if f.text %}<pre class="doc">{{ f.text }}</pre>
+  {% elif f.note %}<p class="muted">{{ f.note }}</p>{% endif %}
+{% endfor %}
+{% if not files and not answer %}<p class="muted">No attachments.</p>{% endif %}
+{% endblock %}

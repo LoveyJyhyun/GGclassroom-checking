@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Report · {{ work.title }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="{{ url_for('index') }}">Courses</a> / <a href="{{ url_for('course', course_id=course.id) }}">{{ course.name }}</a> / <a href="{{ url_for('assignment', course_id=course.id, work_id=work.id) }}">{{ work.title }}</a> / Report</nav>{% endblock %}
+{% block content %}
+{% set S = report.students %}
+<div class="bar">
+  <h1>Report: {{ work.title }}</h1>
+  <div>
+    <a href="{{ url_for('check', course_id=course.id, work_id=work.id) }}">Run again</a>
+    <a class="button" href="{{ url_for('download_report', filename=report_file) }}">Download JSON</a>
+  </div>
+</div>
+<p class="muted">{{ S|length }} submissions checked · {{ report.generated_at }}{% if report.options.model %} · model {{ report.options.model }}{% endif %}</p>
+
+{% for e in report.errors %}<div class="warn">{{ e }}</div>{% endfor %}
+
+{% if report.duplicates is not none %}
+<h2>Possible copying</h2>
+{% if report.duplicates %}
+<table class="list">
+  <thead><tr><th>Student A</th><th>Student B</th><th>Same wording</th><th>Same meaning</th><th>Same code</th><th>LLM review</th></tr></thead>
+  <tbody>
+  {% for p in report.duplicates %}
+    <tr>
+      <td>{{ S[p.a].name }}</td><td>{{ S[p.b].name }}</td>
+      <td>{{ '%d%%'|format(p.lexical * 100) if p.lexical is not none else '—' }}</td>
+      <td>{{ '%d%%'|format(p.semantic * 100) if p.semantic is not none else '—' }}</td>
+      <td>{{ '%d%%'|format(p.code * 100) if p.code is not none else '—' }}</td>
+      <td class="small">{% if p.llm %}
+        <span class="tag {{ 'missing' if p.llm.copied else 'graded' }}">{{ 'likely copied' if p.llm.copied else 'probably independent' }} · {{ p.llm.confidence }}%</span>
+        <ul>{% for e in p.llm.evidence %}<li>{{ e }}</li>{% endfor %}</ul>
+      {% else %}—{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="muted">No pairs above the threshold.</p>{% endif %}
+{% endif %}
+
+{% if report.numbers %}
+<h2>Number answers</h2>
+{% set key = report.numbers.key %}
+<div class="scroll">
+<table class="list">
+  <thead><tr><th>Student</th><th>Score</th>{% for q in key %}<th>Q{{ q }}<div class="muted small">{{ '%g'|format(key[q].value) }}</div></th>{% endfor %}<th>Source</th></tr></thead>
+  <tbody>
+  {% for uid, r in report.numbers.results.items() %}
+    <tr>
+      <td>{{ S[uid].name }}</td>
+      <td><strong>{{ r.correct }}/{{ r.total }}</strong></td>
+      {% for x in r.results %}
+        <td class="cell {{ 'graded' if x.ok else ('missing' if x.got is none else 'late') }}">{{ '%g'|format(x.got) if x.got is not none else '—' }}</td>
+      {% endfor %}
+      <td class="small muted">{{ r.source }}{% if r.error %} ({{ r.error }}){% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if report.ai is not none %}
+<h2>AI-writing indicators <span class="muted small">signals to follow up on, never proof</span></h2>
+<table class="list">
+  <thead><tr><th>Student</th><th>Heuristic</th><th>LLM</th><th>Why</th></tr></thead>
+  <tbody>
+  {% for uid, r in report.ai.items() %}
+    {% set h = r.heuristic.score %}{% set l = r.llm.likelihood if r.llm else none %}
+    <tr>
+      <td>{{ S[uid].name }}<div class="muted small">{{ r.heuristic.words }} words</div></td>
+      <td>{% if h is none %}—{% else %}<span class="tag {{ 'missing' if h >= 60 else ('late' if h >= 30 else 'graded') }}">{{ h }}%</span>{% endif %}</td>
+      <td>{% if l is none %}—{% else %}<span class="tag {{ 'missing' if l >= 70 else ('late' if l >= 40 else 'graded') }}">{{ l }}%</span>{% endif %}</td>
+      <td class="small"><ul>
+        {% for s in r.heuristic.signals %}<li>{{ s }}</li>{% endfor %}
+        {% if r.llm %}{% for s in r.llm.reasons %}<li>LLM: {{ s }}</li>{% endfor %}{% endif %}
+        {% if r.error %}<li class="muted">{{ r.error }}</li>{% endif %}
+      </ul></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No written text found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if report.code is not none %}
+<h2>Code</h2>
+{% for uid, r in report.code.results.items() %}
+<details class="coderes">
+  <summary><strong>{{ S[uid].name }}</strong> · {{ r.files|join(', ') }} ·
+    <span class="tag {{ 'graded' if r.passed == r.total and r.total else ('late' if r.passed else 'missing') }}">{{ r.passed }}/{{ r.total }} passed</span>
+    {% if r.llm %}· {{ r.llm.summary }}{% endif %}
+    {% if r.error %}<span class="muted">· {{ r.error }}</span>{% endif %}</summary>
+  {% for t in r.tests %}
+    <div class="test {{ 'ok' if t.passed else 'fail' }}">
+      <div><strong>Test {{ loop.index }}: {{ 'PASS' if t.passed else 'FAIL' }}</strong>
+        {% if t.timed_out %}(timed out){% elif t.exit_code %}(exit code {{ t.exit_code }}){% endif %}</div>
+      {% if t.input %}<div class="small">stdin</div><pre>{{ t.input }}</pre>{% endif %}
+      {% if t.expected is not none %}<div class="small">expected</div><pre>{{ t.expected }}</pre>{% endif %}
+      <div class="small">stdout</div><pre>{{ t.stdout or '(empty)' }}</pre>
+      {% if t.stderr %}<div class="small">stderr</div><pre>{{ t.stderr }}</pre>{% endif %}
+    </div>
+  {% endfor %}
+  {% if r.llm and r.llm.issues %}<div class="small">LLM review:</div><ul>{% for i in r.llm.issues %}<li>{{ i }}</li>{% endfor %}</ul>{% endif %}
+</details>
+{% else %}<p class="muted">No code files found in submissions.</p>{% endfor %}
+{% endif %}
+
+{% set notes = [] %}{% for uid, s in S.items() %}{% for n in s.notes %}{% set _ = notes.append(s.name ~ ': ' ~ n) %}{% endfor %}{% endfor %}
+{% if notes %}<h2>Not checked</h2><ul class="small muted">{% for n in notes %}<li>{{ n }}</li>{% endfor %}</ul>{% endif %}
+{% endblock %}

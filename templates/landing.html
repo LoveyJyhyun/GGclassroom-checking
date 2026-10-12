@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <h1>Check Google Classroom work</h1>
+  <p>See who turned in, who is late and who is missing. Read submitted files, and check them for
+     copying, number answers, AI writing and runnable code with a local LLM.</p>
+  <a class="button" href="{{ url_for('login') }}">Sign in with Google</a>
+  <p class="muted">Read-only access. Sign in with a teacher account.</p>
+</section>
+{% endblock %}

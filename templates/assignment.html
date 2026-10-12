@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}{{ work.title }}{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="{{ url_for('index') }}">Courses</a> / <a href="{{ url_for('course', course_id=course.id) }}">{{ course.name }}</a> / {{ work.title }}</nav>{% endblock %}
+{% block content %}
+<div class="bar">
+  <h1>{{ work.title }}</h1>
+  <a class="button" href="{{ url_for('check', course_id=course.id, work_id=work.id) }}">Run checks (local LLM)</a>
+</div>
+<p class="muted">
+  {% if due %}Due {{ due.strftime('%Y-%m-%d %H:%M') }} UTC{% else %}No due date{% endif %}
+  {% if work.maxPoints %} · {{ '%g'|format(work.maxPoints) }} points{% endif %}
+  · <a href="{{ work.alternateLink }}" target="_blank" rel="noopener">Open in Classroom</a>
+</p>
+{% if work.description %}<p class="desc">{{ work.description }}</p>{% endif %}
+
+<div class="chips">
+  <a class="chip {{ 'active' if not status_filter }}" href="{{ url_for('assignment', course_id=course.id, work_id=work.id) }}">All</a>
+  {% for key, label in labels.items() %}{% if counts[key] %}
+  <a class="chip {{ key }} {{ 'active' if status_filter == key }}" href="{{ url_for('assignment', course_id=course.id, work_id=work.id, status=key) }}">{{ label }} · {{ counts[key] }}</a>
+  {% endif %}{% endfor %}
+</div>
+
+<table class="list">
+  <thead><tr><th>Student</th><th>Status</th><th>Turned in</th><th>Grade</th><th>Work</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td><a href="{{ url_for('submission', course_id=course.id, work_id=work.id, sub_id=r.sub.id) }}">{{ r.student.profile.name.fullName }}</a>
+        <div class="muted small">{{ r.student.profile.emailAddress }}</div></td>
+      <td><span class="tag {{ r.status }}">{{ labels[r.status] }}</span></td>
+      <td class="small">{{ r.turned_in_at[:16]|replace('T', ' ') if r.turned_in_at else '' }}</td>
+      <td>{{ '%g'|format(r.grade) if r.grade is not none else '' }}</td>
+      <td class="small">
+        {% if r.answer %}<div>{{ r.answer if r.answer is string else r.answer }}</div>{% endif %}
+        {% for a in r.attachments %}<div><a href="{{ a.url }}" target="_blank" rel="noopener">{{ a.title }}</a></div>{% endfor %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="5" class="muted">No submissions.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
