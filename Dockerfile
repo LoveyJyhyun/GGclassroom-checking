@@ -9,17 +9,19 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOST=0.0.0.0 \
     PORT=8080 \
     REPORTS_DIR=/data/reports \
+    ANSWER_KEYS_DIR=/data/answer_keys \
     GOOGLE_TOKEN_FILE=/data/token.json \
     GOOGLE_CLIENT_SECRETS=/secrets/client_secret.json
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+RUN pip install --no-cache-dir --retries 5 --timeout 60 -r requirements.txt gunicorn==26.2.0
 
 COPY app.py .
 COPY checker ./checker
 COPY templates ./templates
 COPY static ./static
+COPY examples ./examples
 
 EXPOSE 8080
 # One worker so sessions and in-memory state stay consistent; threads for concurrency.

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import os
+import re
+import threading
+import uuid
 from collections import Counter
 from functools import wraps
 
@@ -15,7 +19,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.errors import HttpError
 
-from checker import checks, llm, runner
+from checker import answerkey, checks, llm, results, runner
 from checker import status as st
 from checker.classroom import SCOPES, Classroom
 
@@ -260,23 +264,130 @@ def submission(cr: Classroom, course_id: str, work_id: str, sub_id: str):
 def check(cr: Classroom, course_id: str, work_id: str):
     work = cr.one_course_work(course_id, work_id)
     course_info = cr.course(course_id)
-    if request.method == "GET":
+
+    def form_page(upload_error: str | None = None, code: int = 200):
         return render_template("check.html", course=course_info, work=work,
                                ollama=llm.status(), runner=runner.runner_available(),
-                               all_checks=checks.ALL_CHECKS)
+                               all_checks=checks.ALL_CHECKS, models=llm.installed(),
+                               upload_error=upload_error), code
+
+    if request.method == "GET":
+        return form_page()
     form = request.form
+
+    model_answer = form.get("model_answer", "")
+    upload = request.files.get("model_answer_file")
+    if upload and upload.filename:
+        try:
+            model_answer = answerkey.read_upload(upload.filename, upload.read())
+        except ValueError as e:
+            return form_page(str(e), 400)
+
     opts = checks.Options(
         checks=tuple(c for c in checks.ALL_CHECKS if form.get(c)),
         use_llm=bool(form.get("use_llm")),
+        model=form.get("model", ""),
+        embed_model=form.get("embed_model", ""),
         answer_key=form.get("answer_key", ""),
+        model_answer=model_answer,
         tests=form.get("tests", ""),
         dup_threshold=float(form.get("threshold") or 0.3),
         include_unsubmitted=bool(form.get("include_unsubmitted")),
     )
-    report = checks.run(cr, course_id, work_id, opts)
-    path = checks.save(report)
-    return render_template("report.html", course=course_info, work=work, report=report,
-                           report_file=os.path.basename(path), labels=st.LABELS)
+    # A full check takes minutes, so it runs in a thread and the browser watches a
+    # progress bar instead of holding one very long request open.
+    job_id = start_job(_credentials(), course_id, work_id, opts)
+    return redirect(url_for("job_page", job_id=job_id))
+
+
+# --- Background check jobs --------------------------------------------------
+
+# ponytail: in-memory, and the app runs one gunicorn worker (see the Dockerfile), so
+# every request sees the same dict. Jobs are lost on restart; reports on disk are not.
+JOBS: dict[str, dict] = {}
+MAX_JOBS = 50
+
+
+def start_job(creds, course_id: str, work_id: str, opts: checks.Options) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    state = {"id": job_id, "state": "running", "phase": "Starting", "message": "",
+             "done": 0, "total": 0, "report_file": None, "error": None,
+             "course_id": course_id, "work_id": work_id,
+             "checks": list(opts.checks)}
+    JOBS[job_id] = state
+    for old in list(JOBS)[:-MAX_JOBS]:          # keep the recent ones, drop the rest
+        JOBS.pop(old, None)
+
+    def worker():
+        try:
+            progress = checks.Progress(
+                lambda phase, message, done, total: state.update(
+                    phase=phase, message=message, done=done, total=total))
+            report = checks.run(Classroom(creds), course_id, work_id, opts, progress=progress)
+            path = checks.save(report)
+            results.save_csv(report, path[:-len(".json")] + ".csv")
+            state["report_file"] = os.path.basename(path)
+            state["state"] = "done"
+        except Exception as e:                  # noqa: BLE001 - a thread must not die silently
+            state["state"] = "error"
+            state["error"] = f"{type(e).__name__}: {e}"
+
+    threading.Thread(target=worker, daemon=True, name=f"check-{job_id}").start()
+    return job_id
+
+
+def _job_or_404(job_id: str) -> dict:
+    if "credentials" not in session:
+        abort(401)
+    state = JOBS.get(job_id)
+    if state is None:
+        abort(404)
+    return state
+
+
+@app.route("/job/<job_id>")
+def job_page(job_id: str):
+    return render_template("job.html", job=_job_or_404(job_id))
+
+
+@app.route("/job/<job_id>/status")
+def job_status(job_id: str):
+    return _job_or_404(job_id)
+
+
+# --- Saved reports ----------------------------------------------------------
+
+SAFE_REPORT_NAME = re.compile(r"^[\w.-]+\.json$")
+
+
+def _load_report(filename: str) -> dict:
+    if "credentials" not in session:
+        abort(401)
+    if not SAFE_REPORT_NAME.match(filename):
+        abort(404)
+    path = os.path.join(os.path.abspath(checks.REPORTS_DIR), filename)
+    if not os.path.isfile(path):
+        abort(404)
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+@app.route("/report/<filename>")
+def report_page(filename: str):
+    report = _load_report(filename)
+    return render_template("report.html", course=report.get("course") or {"id": report["course_id"]},
+                           work=report["work"], report=report,
+                           report_file=filename, labels=st.LABELS)
+
+
+@app.route("/report/<filename>/csv")
+def report_csv(filename: str):
+    report = _load_report(filename)
+    name = filename[:-len(".json")] + ".csv"
+    # The BOM makes Excel on Windows read the Vietnamese names as UTF-8.
+    return Response("\ufeff" + results.to_csv(report),
+                    mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.route("/reports/<path:filename>")

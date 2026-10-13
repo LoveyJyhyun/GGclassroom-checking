@@ -4,6 +4,8 @@ from __future__ import annotations
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from . import documents
+
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.rosters.readonly",
@@ -13,7 +15,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",
 ]
 
-MAX_TEXT_BYTES = 2_000_000
 TEXT_EXPORTS = {
     "application/vnd.google-apps.document": "text/plain",
     "application/vnd.google-apps.presentation": "text/plain",
@@ -24,6 +25,15 @@ RAW_TEXT_MIMES = {
     "application/x-ipynb+json", "application/vnd.google.colaboratory",
 }
 CODE_EXTENSIONS = (".py", ".ipynb", ".js", ".txt", ".csv", ".md", ".json")
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# Anything not exported by Google and not plain text is handed to documents.extract,
+# which decides from the bytes what it is. Archives may be bigger than documents
+# because only their text members are read.
+ARCHIVE_HINTS = (".zip", ".rar", ".tar", ".tar.gz", ".tgz", ".7z")
+
+# Kept for callers that only want Word text.
+docx_text = documents.docx_text
 
 
 def _paginate(request_fn, key: str, **kwargs) -> list[dict]:
@@ -78,8 +88,12 @@ class Classroom:
         return info["text"], info["note"]
 
     def file_content(self, file_id: str) -> dict:
-        """Return {name, mime, text, note}; text is None when unreadable."""
-        result = {"name": "", "mime": "", "text": None, "note": ""}
+        """Return {name, mime, text, parts, note}; text is None when unreadable.
+
+        `parts` is [(member name, text)] - one entry for a document, one per readable
+        file for an archive, so the caller can route each member by its own name.
+        """
+        result = {"name": "", "mime": "", "text": None, "parts": [], "note": ""}
         try:
             meta = self.drive.files().get(fileId=file_id, fields="mimeType,size,name").execute()
         except HttpError as e:
@@ -87,23 +101,32 @@ class Classroom:
             return result
         mime, name = meta.get("mimeType", ""), meta.get("name", "")
         result.update(name=name, mime=mime)
-        readable = (mime.startswith("text/") or mime in RAW_TEXT_MIMES
-                    or name.lower().endswith(CODE_EXTENSIONS))
+        size = int(meta.get("size", 0))
+        looks_archived = name.lower().endswith(ARCHIVE_HINTS)
+        limit = documents.MAX_ARCHIVE_BYTES if looks_archived else documents.MAX_DOCUMENT_BYTES
         try:
             if mime in TEXT_EXPORTS:
-                data = self.drive.files().export(fileId=file_id, mimeType=TEXT_EXPORTS[mime]).execute()
-            elif readable:
-                if int(meta.get("size", 0)) > MAX_TEXT_BYTES:
-                    result["note"] = "File is too large to read."
-                    return result
-                data = self.drive.files().get_media(fileId=file_id).execute()
-            else:
-                result["note"] = f"Reading {mime or 'this file type'} is not supported."
+                data = self.drive.files().export(fileId=file_id,
+                                                 mimeType=TEXT_EXPORTS[mime]).execute()
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                result["text"] = data.lstrip("\ufeff")
+                result["parts"] = [(name, result["text"])]
                 return result
+
+            if size > limit:
+                result["note"] = "File is too large to read."
+                return result
+            raw = self.drive.files().get_media(fileId=file_id).execute()
         except HttpError as e:
             result["note"] = f"Cannot read file ({e.status_code})."
             return result
-        if isinstance(data, bytes):
-            data = data.decode("utf-8", errors="replace")
-        result["text"] = data.lstrip("\ufeff")
+
+        if not isinstance(raw, bytes):                 # a stub or an already-text body
+            raw = str(raw).encode("utf-8", errors="replace")
+        found = documents.extract(name, raw)
+        result["parts"] = found["parts"]
+        result["note"] = found["note"]
+        if found["parts"]:
+            result["text"] = "\n\n".join(text for _, text in found["parts"])
         return result

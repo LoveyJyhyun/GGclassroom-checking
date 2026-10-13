@@ -7,10 +7,11 @@
 <div class="status-box">
   {% if ollama.ok %}
     <div>Ollama <span class="tag graded">connected</span> at {{ ollama.url }}</div>
-    <div>Chat model <code>{{ ollama.model }}</code>:
-      {% if ollama.model_ok %}<span class="tag graded">installed</span>{% else %}<span class="tag missing">missing</span> run <code>ollama pull {{ ollama.model }}</code>{% endif %}</div>
-    <div>Embedding model <code>{{ ollama.embed_model }}</code>:
-      {% if ollama.embed_ok %}<span class="tag graded">installed</span>{% else %}<span class="tag missing">missing</span> run <code>ollama pull {{ ollama.embed_model }}</code>{% endif %}</div>
+    <div>{{ models|length }} model(s) installed; pick them under <strong>Model</strong> below.</div>
+    {% if not models|selectattr('can_embed')|list %}
+      <div><span class="tag late">no embedding model</span>
+        paraphrase detection needs one: <code>ollama pull nomic-embed-text</code></div>
+    {% endif %}
   {% else %}
     <div>Ollama <span class="tag missing">not reachable</span> at {{ ollama.url }}. Start it with <code>ollama serve</code>, or untick “Use local LLM”.</div>
   {% endif %}
@@ -19,22 +20,61 @@
     {% else %}<span class="tag missing">unavailable</span> {{ runner[1] }}{% endif %}</div>
 </div>
 
-<form method="post" class="checkform" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Running… this can take several minutes';">
+{% if upload_error %}<div class="warn">{{ upload_error }}</div>{% endif %}
+
+<form method="post" enctype="multipart/form-data" class="checkform" onsubmit="this.querySelector('button').disabled=true; this.querySelector('button').textContent='Running… this can take several minutes';">
   <fieldset>
     <legend>Checks</legend>
     <label><input type="checkbox" name="duplicates" checked> Copying between students</label>
     <label><input type="checkbox" name="numbers"> Number answers (needs answer key)</label>
+    <label><input type="checkbox" name="rubric"> Compare with the model answer (written answers)</label>
     <label><input type="checkbox" name="ai" checked> AI-written text indicators</label>
     <label><input type="checkbox" name="code"> Run code (.py, .js, .ipynb attachments)</label>
   </fieldset>
   <fieldset>
+    <legend>Model <span class="muted small">whichever you have installed; bigger judges better but is slower</span></legend>
+    <label><input type="checkbox" name="use_llm" {{ 'checked' if ollama.ok }}> Use a local LLM
+      <span class="muted small">(untick for heuristics, pattern matching and tests only &mdash; fast, no model needed)</span></label>
+    <label>Chat model
+      <select name="model">
+        {% for m in models if m.can_chat %}
+          <option value="{{ m.name }}" {{ 'selected' if m.name == ollama.model or m.name == ollama.model ~ ':latest' }}>
+            {{ m.name }} &mdash; {{ m.parameters or '?' }}, {{ m.size_gb }} GB{% if m.context %}, context {{ '{:,}'.format(m.context) }}{% endif %}
+          </option>
+        {% else %}
+          <option value="">no chat model installed</option>
+        {% endfor %}
+      </select></label>
+    <label>Embedding model <span class="muted small">(copy detection by meaning)</span>
+      <select name="embed_model">
+        {% for m in models if m.can_embed %}
+          <option value="{{ m.name }}" {{ 'selected' if m.name == ollama.embed_model or m.name == ollama.embed_model ~ ':latest' }}>
+            {{ m.name }} &mdash; {{ m.parameters or '?' }}, context {{ '{:,}'.format(m.context) if m.context else '?' }}
+          </option>
+        {% else %}
+          <option value="">none installed</option>
+        {% endfor %}
+      </select></label>
+    <p class="muted small">Prompts are sized to the model you choose, so a model with a
+      smaller window is used safely rather than overflowing. Current limit:
+      {{ '{:,}'.format(ollama.num_ctx) if ollama.num_ctx else 'n/a' }} tokens.</p>
+  </fieldset>
+  <fieldset>
     <legend>Options</legend>
-    <label><input type="checkbox" name="use_llm" {{ 'checked' if ollama.ok }}> Use local LLM ({{ ollama.model }})</label>
     <label><input type="checkbox" name="include_unsubmitted"> Include work that is not turned in yet</label>
     <label>Copy threshold <input type="number" name="threshold" min="0.05" max="1" step="0.05" value="0.3"></label>
   </fieldset>
   <fieldset>
-    <legend>Answer key <span class="muted small">one per line: <code>1: 42</code>, <code>2: 3.14 ± 0.01</code>, <code>3: 25%</code>, <code>4: 1/3 ± 1%</code></span></legend>
+    <legend>Model answer sheet <span class="muted small">optional; condensed once into a short answer key and reused</span></legend>
+    <label>Upload a file <input type="file" name="model_answer_file" accept=".md,.txt,.csv,.json,.ipynb,.py,.js,text/*"></label>
+    <label class="muted small">…or paste the text (Google Docs: select all, copy, paste here)
+      <textarea name="model_answer" rows="6" placeholder="Câu 1: 42&#10;Câu 2: 3,14 (sai số 0,01)&#10;Câu 3: Nêu định luật bảo toàn năng lượng, có đơn vị…"></textarea></label>
+    <p class="muted small">The sheet is summarised to <code>answer_keys/&lt;hash&gt;.md</code>. Numeric
+      answers fill the answer key below automatically and are compared in Python; written answers
+      are compared point by point when “Compare with the model answer” is ticked.</p>
+  </fieldset>
+  <fieldset>
+    <legend>Answer key <span class="muted small">one per line: <code>1: 42</code>, <code>2: 3.14 ± 0.01</code>, <code>3: 25%</code>, <code>4: 1/3 ± 1%</code>. Leave empty to use the model answer above.</span></legend>
     <textarea name="answer_key" rows="6" placeholder="1: 42&#10;2: 3.14 ± 0.01"></textarea>
   </fieldset>
   <fieldset>

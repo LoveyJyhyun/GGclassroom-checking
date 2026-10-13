@@ -15,7 +15,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from . import checks, llm, runner
+from . import answerkey, checks, llm, results, runner
 from . import status as st
 from .classroom import SCOPES, Classroom
 
@@ -51,6 +51,51 @@ def read_arg_file(path: str | None) -> str:
         return ""
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+class Bar:
+    """One-line progress bar on stderr, so stdout stays pipeable."""
+
+    WIDTH = 28
+
+    def __init__(self, stream=sys.stderr):
+        self.stream = stream
+        self.live = stream.isatty()
+        self.width = 0
+
+    def __call__(self, phase: str, message: str, done: int, total: int) -> None:
+        if total:
+            filled = round(self.WIDTH * done / total)
+            bar = "#" * filled + "-" * (self.WIDTH - filled)
+            head = f"[{bar}] {done:>3}/{total}"
+        else:
+            head = f"[{'?' * self.WIDTH}]  ...  "
+        line = f"{head}  {phase}{': ' + message if message else ''}"[:110]
+        if self.live:
+            # Pad to the previous width instead of an ANSI erase: the old Windows
+            # console does not process escape codes and would print them literally.
+            self.stream.write("\r" + line.ljust(self.width))
+            self.width = len(line)
+        else:
+            self.stream.write(line + "\n")
+        self.stream.flush()
+
+    def close(self) -> None:
+        if self.live:
+            self.stream.write("\r" + " " * self.width + "\r")
+        self.stream.flush()
+
+
+def print_scores(report: dict) -> None:
+    marks = {uid: s for uid, s in (report.get("scores") or {}).items() if s}
+    if not marks:
+        return
+    names = {uid: s["name"] for uid, s in report["students"].items()}
+    print("\n-- Final score (from the answer sheet) --")
+    for uid, sc in sorted(marks.items(), key=lambda kv: -kv[1]["percent"]):
+        wrong = [q for q, v in sorted(sc["per_question"].items()) if v < 0.999]
+        print(f"  {names[uid]}: {sc['percent']:5.1f}%  ({sc['earned']}/{sc['questions']})"
+              + (f"  lost marks on: {', '.join(wrong)}" if wrong else ""))
 
 
 def print_summary(report: dict) -> None:
@@ -98,19 +143,35 @@ def print_summary(report: dict) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Student names and answer keys are often Vietnamese; the Windows console
+    # defaults to cp1252 and would raise UnicodeEncodeError on every print.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(prog="python -m checker.cli")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("courses", help="list your active courses")
     p_works = sub.add_parser("works", help="list assignments in a course")
     p_works.add_argument("--course", required=True)
     sub.add_parser("status", help="check Ollama and the code runner")
+    sub.add_parser("models", help="list the LLMs installed on this machine")
+    p_key = sub.add_parser("answerkey", help="condense a model answer sheet into a short key")
+    p_key.add_argument("--file", required=True, help="the model answer sheet (.md, .txt, .ipynb)")
+    p_key.add_argument("--model", default="", help="chat model to use")
+    p_key.add_argument("--no-llm", action="store_true", help="pattern matching only")
     p_check = sub.add_parser("check", help="run checks on one assignment")
     p_check.add_argument("--course", required=True)
     p_check.add_argument("--work", required=True)
     p_check.add_argument("--checks", default=",".join(checks.ALL_CHECKS),
                          help="comma list of: " + ", ".join(checks.ALL_CHECKS))
     p_check.add_argument("--key", help="answer key file for the numbers check")
+    p_check.add_argument("--model-answer", help="teacher's model answer sheet; condensed once, "
+                                                "then reused (fills --key when it is not given)")
     p_check.add_argument("--tests", help="test cases file for the code check")
+    p_check.add_argument("--model", default="", help="chat model to use; see `models` "
+                                                     "(default: $OLLAMA_MODEL)")
+    p_check.add_argument("--embed-model", default="", help="embedding model for copy detection")
     p_check.add_argument("--no-llm", action="store_true", help="heuristics only, no Ollama calls")
     p_check.add_argument("--threshold", type=float, default=0.3, help="copy-detection threshold (0-1)")
     p_check.add_argument("--include-unsubmitted", action="store_true")
@@ -122,8 +183,39 @@ def main(argv: list[str] | None = None) -> int:
         if s["ok"]:
             print(f"  chat model  {s['model']}: {'installed' if s['model_ok'] else 'missing -> ollama pull ' + s['model']}")
             print(f"  embed model {s['embed_model']}: {'installed' if s['embed_ok'] else 'missing -> ollama pull ' + s['embed_model']}")
+            print(f"  context in use: {s['num_ctx']:,} tokens")
+            print("  other models available: run `python -m checker.cli models`")
         ok, note = runner.runner_available()
         print(f"Code runner: {note}" if ok else f"Code runner: unavailable - {note}")
+        return 0
+
+    if args.cmd == "models":
+        found = llm.installed()
+        if not found:
+            print(f"No models found. Is Ollama running at {llm.OLLAMA_URL}?")
+            return 1
+        print(f"{'MODEL':26} {'SIZE':>8}  {'PARAMS':>7}  {'CONTEXT':>9}  USE")
+        for m in found:
+            use = ", ".join(filter(None, ["chat" if m["can_chat"] else "",
+                                          "embeddings" if m["can_embed"] else ""]))
+            context = f"{m['context']:,}" if m["context"] else "?"
+            print(f"{m['name']:26} {m['size_gb']:6.1f} GB  {m['parameters'] or '?':>7}  "
+                  f"{context:>9}  {use}")
+        print(f"\nIn use now: chat {llm.chat_model()}, embeddings {llm.embed_model()}.")
+        print("Pick another with --model / --embed-model, or set OLLAMA_MODEL in .env.")
+        return 0
+
+    if args.cmd == "answerkey":
+        with open(args.file, "rb") as fh:
+            text = answerkey.read_upload(args.file, fh.read())
+        llm.select(args.model)
+        built = answerkey.load_or_build(text, use_llm=not args.no_llm,
+                                        title=os.path.basename(args.file))
+        for e in built["key"]["errors"]:
+            print(f"! {e}", file=sys.stderr)
+        print(built["markdown"])
+        print(f"\nSaved to {built['path'][:-5]}.md"
+              f"{' (reused from cache)' if built['cached'] else ''}", file=sys.stderr)
         return 0
 
     cr = Classroom(credentials())
@@ -140,13 +232,24 @@ def main(argv: list[str] | None = None) -> int:
         if unknown:
             parser.error(f"unknown checks: {', '.join(sorted(unknown))}")
         opts = checks.Options(checks=selected, use_llm=not args.no_llm,
-                              answer_key=read_arg_file(args.key), tests=read_arg_file(args.tests),
+                              model=args.model, embed_model=args.embed_model,
+                              answer_key=read_arg_file(args.key),
+                              model_answer=read_arg_file(args.model_answer),
+                              tests=read_arg_file(args.tests),
                               dup_threshold=args.threshold,
                               include_unsubmitted=args.include_unsubmitted)
-        report = checks.run(cr, args.course, args.work, opts,
-                            progress=lambda m: print(f"... {m}", file=sys.stderr))
+        bar = Bar()
+        try:
+            report = checks.run(cr, args.course, args.work, opts,
+                                progress=checks.Progress(bar))
+        finally:
+            bar.close()
         print_summary(report)
-        print(f"\nFull report: {checks.save(report)}")
+        print_scores(report)
+        path = checks.save(report)
+        csv_path = results.save_csv(report, path[:-len(".json")] + ".csv")
+        print(f"\nFull report: {path}")
+        print(f"Results CSV: {csv_path}")
     return 0
 
 
