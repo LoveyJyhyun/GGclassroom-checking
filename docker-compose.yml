@@ -17,6 +17,7 @@ services:
       GOOGLE_CLIENT_SECRETS: /secrets/client_secret.json
       GOOGLE_TOKEN_FILE: /data/token.json
       REPORTS_DIR: /data/reports
+      ANSWER_KEYS_DIR: /data/answer_keys
       OLLAMA_URL: http://ollama:11434
       # Use Ollama already running on your computer instead of the container below:
       # OLLAMA_URL: http://host.docker.internal:11434

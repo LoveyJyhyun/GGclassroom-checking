@@ -6,6 +6,8 @@ venv/
 client_secret*.json
 .pytest_cache/
 reports/
+answer_keys/
 token.json
 secrets/
 data/
+dist/

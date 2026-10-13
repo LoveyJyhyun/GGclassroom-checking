@@ -16,7 +16,10 @@ _LABEL = re.compile(
     r"^\s*(?:q(?:uestion)?|câu|bài|ex(?:ercise)?|problem|#)?\s*(\d+[a-z]?)\s*[:.)=\-]\s*(.*)$",
     re.IGNORECASE,
 )
-_TOL = re.compile(r"(?:±|\+/-|\+-)\s*([\d.]+%?)\s*$")
+# Tolerances may use a decimal comma ("± 0,01") and may be written out in words
+# or in brackets, which is how Vietnamese answer sheets usually put it:
+#   "3,14 ± 0,01"   "3.14 (sai số 0,01)"   "3.14 (sai so 0.01)"   "1/3 +- 1%"
+_TOL = re.compile(r"[(\[]?\s*(?:±|\+/-|\+-|sai\s*s[oố]|tolerance|tol)\s*[:=]?\s*([\d.,]*\d\s*%?)\s*[)\]]?\s*$", re.IGNORECASE)
 
 
 def parse_number(token: str) -> float | None:
@@ -75,9 +78,12 @@ def parse_key(text: str) -> dict[str, dict]:
 
 def is_close(expected: float, got: float, tol: str | None = None, default_rel: float = 1e-3) -> bool:
     if tol:
-        if tol.endswith("%"):
-            return abs(got - expected) <= abs(expected) * float(tol[:-1]) / 100
-        return abs(got - expected) <= float(tol)
+        tol = tol.strip().replace(" ", "")
+        amount = parse_number(tol.rstrip("%"))
+        if amount is not None:                      # an unreadable tolerance falls through
+            if tol.endswith("%"):
+                return abs(got - expected) <= abs(expected) * amount / 100
+            return abs(got - expected) <= amount
     return math.isclose(got, expected, rel_tol=default_rel, abs_tol=1e-9)
 
 
@@ -100,10 +106,10 @@ EXTRACT_SYSTEM = (
 )
 
 
-def extract_with_llm(text: str, labels: list[str]) -> dict[str, float]:
-    prompt = (f"Question labels: {', '.join(labels)}\n\n"
-              f"Student submission:\n<<<\n{text}\n>>>")
-    data = llm.chat_json(EXTRACT_SYSTEM, prompt)
+def extract_with_llm(text: str, labels: list[str]) -> tuple[dict[str, float], list[str]]:
+    """Return (label -> number the student wrote, sections that had to be trimmed)."""
+    data, trimmed = llm.pack_json(EXTRACT_SYSTEM, [("Question labels", ", ".join(labels)),
+                                                   ("Student submission", text)])
     found = {}
     for label, raw in (data.get("answers") or {}).items():
         value = parse_number(str(raw)) if raw is not None else None
@@ -111,7 +117,7 @@ def extract_with_llm(text: str, labels: list[str]) -> dict[str, float]:
             value = last_number(str(raw))
         if value is not None:
             found[str(label).lower().strip()] = value
-    return found
+    return found, trimmed
 
 
 def check(text: str, key: dict[str, dict], use_llm: bool = True,
@@ -119,10 +125,10 @@ def check(text: str, key: dict[str, dict], use_llm: bool = True,
     found = extract_by_labels(text)
     source = "pattern"
     missing = [label for label in key if label not in found]
-    llm_error = None
+    llm_error, truncated = None, []
     if missing and use_llm and text.strip():
         try:
-            extra = extract_with_llm(text, missing)
+            extra, truncated = extract_with_llm(text, missing)
             for label in missing:
                 if label in extra:
                     found[label] = extra[label]
@@ -138,4 +144,4 @@ def check(text: str, key: dict[str, dict], use_llm: bool = True,
         results.append({"question": label, "expected": exp["value"], "tol": exp["tol"],
                         "got": got, "ok": ok})
     return {"results": results, "correct": correct, "total": len(key),
-            "source": source, "error": llm_error}
+            "source": source, "error": llm_error, "truncated": truncated}

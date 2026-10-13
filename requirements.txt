@@ -1,4 +1,7 @@
-Flask>=3.0
-google-api-python-client>=2.100
-google-auth>=2.23
-google-auth-oauthlib>=1.1
+# Pinned so the Docker image rebuilds the same way. Without pins, pip explored
+# google-auth-oauthlib 1.1.0 and failed with ResolutionImpossible on one build
+# and succeeded on the next.
+Flask==3.1.3
+google-api-python-client==2.201.0
+google-auth==2.61.0
+google-auth-oauthlib==1.5.0

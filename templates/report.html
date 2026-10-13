@@ -7,12 +7,68 @@
   <h1>Report: {{ work.title }}</h1>
   <div>
     <a href="{{ url_for('check', course_id=course.id, work_id=work.id) }}">Run again</a>
-    <a class="button" href="{{ url_for('download_report', filename=report_file) }}">Download JSON</a>
+    <a class="button" href="{{ url_for('report_csv', filename=report_file) }}">Download CSV</a>
+    <a href="{{ url_for('download_report', filename=report_file) }}">JSON</a>
   </div>
 </div>
 <p class="muted">{{ S|length }} submissions checked · {{ report.generated_at }}{% if report.options.model %} · model {{ report.options.model }}{% endif %}</p>
 
 {% for e in report.errors %}<div class="warn">{{ e }}</div>{% endfor %}
+
+{% if report.scores and report.scores.values()|select|list %}
+<h2>Final score <span class="muted small">from the answer sheet only; copying, AI and code results are listed below but not marked</span></h2>
+{% set labels = report.question_labels or (report.numbers.key|list if report.numbers else []) %}
+<div class="scroll">
+<table class="list">
+  <thead><tr><th>Student</th><th>Score</th><th>Questions</th>
+    {% for q in labels %}<th>Q{{ q }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for uid, sc in report.scores.items() if sc %}
+    <tr>
+      <td>{{ S[uid].name }}</td>
+      <td><strong class="tag {{ 'graded' if sc.percent >= 80 else ('late' if sc.percent >= 50 else 'missing') }}">{{ sc.percent }}%</strong></td>
+      <td class="muted small">{{ sc.earned }} / {{ sc.questions }}</td>
+      {% for q in labels %}
+        {% set v = sc.per_question.get(q) %}
+        <td class="cell {{ '' if v is none else ('graded' if v >= 0.999 else ('missing' if v <= 0.001 else 'late')) }}">{{ '—' if v is none else ('%g'|format(v)) }}</td>
+      {% endfor %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if report.answer_key %}
+<details class="coderes">
+  <summary><strong>Condensed answer key</strong> ·
+    {{ report.answer_key.questions }} question(s) ·
+    <span class="tag {{ 'graded' if report.answer_key.cached else 'late' }}">{{ 'reused from cache' if report.answer_key.cached else 'newly summarised' }}</span>
+    <span class="muted small">· answer_keys/{{ report.answer_key.file[:-5] }}.md</span></summary>
+  <pre>{{ report.answer_key.markdown }}</pre>
+</details>
+{% endif %}
+
+{% if report.rubric %}
+<h2>Compared with the model answer</h2>
+<table class="list">
+  <thead><tr><th>Student</th><th>Points covered</th><th>Missing</th><th>LLM note</th></tr></thead>
+  <tbody>
+  {% for uid, r in report.rubric.results.items() %}
+    <tr>
+      <td>{{ S[uid].name }}</td>
+      <td><strong>{{ r.covered }}/{{ r.total }}</strong></td>
+      <td class="small"><ul>
+        {% for q in r.results %}{% if q.missing %}<li>Q{{ q.question }}: {{ q.missing|join('; ') }}</li>{% endif %}{% endfor %}
+      </ul></td>
+      <td class="small muted">{{ r.note }}{% if r.error %} ({{ r.error }}){% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">No written text found.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
 
 {% if report.duplicates is not none %}
 <h2>Possible copying</h2>

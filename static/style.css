@@ -63,3 +63,11 @@ details.coderes summary { cursor: pointer; }
 .test.ok { border-color: var(--ok-fg); }
 .test.fail { border-color: var(--bad-fg); }
 td ul { margin: 0; padding-left: 18px; }
+
+/* Progress bar on the job page; colours follow the light/dark variables. */
+.runbar { width: 100%; height: 1.4rem; margin: 0 0 .6rem; border: 0; border-radius: 4px; background: var(--none); appearance: none; }
+.runbar::-webkit-progress-bar { background: var(--none); border-radius: 4px; }
+.runbar::-webkit-progress-value { background: var(--ok-fg); border-radius: 4px; transition: width .3s; }
+.runbar::-moz-progress-bar { background: var(--ok-fg); border-radius: 4px; }
+/* No value attribute = still counting the class, so stripe it to read as "working". */
+.runbar:not([value]) { background: repeating-linear-gradient(90deg, var(--line) 0 12px, var(--none) 12px 24px); }

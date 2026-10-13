@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Checking…{% endblock %}
+{% block crumbs %}<nav class="crumbs"><a href="{{ url_for('index') }}">Courses</a> / <a href="{{ url_for('course', course_id=job.course_id) }}">Course</a> / <a href="{{ url_for('assignment', course_id=job.course_id, work_id=job.work_id) }}">Assignment</a> / Checking</nav>{% endblock %}
+{% block content %}
+<h1>Running the checks</h1>
+
+<div class="status-box">
+  <progress id="bar" class="runbar" max="100"></progress>
+  <div><strong id="phase">{{ job.phase }}</strong> <span id="count" class="muted"></span></div>
+  <div id="message" class="muted small">{{ job.message }}</div>
+  <div id="failed" class="warn" hidden></div>
+</div>
+
+<p class="muted small">
+  The checks run in this order: 1. copying between students, 2. answers against the key,
+  3. AI-written text, 4. running code. A full run with a local model takes about a minute
+  per student, so leave this page open — or come back to it later, the run keeps going.
+</p>
+
+<script>
+const REPORT_URL = {{ url_for('report_page', filename='__FILE__')|tojson }};
+const STATUS_URL = {{ url_for('job_status', job_id=job.id)|tojson }};
+const bar = document.getElementById('bar');
+
+async function tick() {
+  let job;
+  try {
+    const response = await fetch(STATUS_URL);
+    if (!response.ok) throw new Error('status ' + response.status);
+    job = await response.json();
+  } catch (e) {
+    document.getElementById('failed').hidden = false;
+    document.getElementById('failed').textContent =
+      'Lost contact with the server (' + e.message + '). Reload to try again.';
+    return;
+  }
+
+  document.getElementById('phase').textContent = job.phase || '';
+  document.getElementById('message').textContent = job.message || '';
+  if (job.total) {
+    bar.max = job.total;
+    bar.value = job.done;                      // a value makes the bar determinate
+    document.getElementById('count').textContent = job.done + ' / ' + job.total;
+  } else {
+    bar.removeAttribute('value');              // still counting the class
+  }
+
+  if (job.state === 'done') {
+    location.href = REPORT_URL.replace('__FILE__', job.report_file);
+    return;
+  }
+  if (job.state === 'error') {
+    bar.removeAttribute('value');
+    document.getElementById('failed').hidden = false;
+    document.getElementById('failed').textContent = job.error;
+    return;
+  }
+  setTimeout(tick, 1000);
+}
+tick();
+</script>
+{% endblock %}

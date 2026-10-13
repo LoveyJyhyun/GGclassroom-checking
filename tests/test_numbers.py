@@ -27,7 +27,41 @@ def test_check_without_llm():
 
 
 def test_check_uses_llm_for_missing(monkeypatch):
-    monkeypatch.setattr(nb, "extract_with_llm", lambda text, labels: {"2": 7.0})
+    monkeypatch.setattr(nb, "extract_with_llm", lambda text, labels: ({"2": 7.0}, []))
     key = nb.parse_key("1: 5\n2: 7")
     r = nb.check("1: 5\nSecond one, the answer is seven: 7", key)
     assert r["correct"] == 2 and r["source"] == "pattern + llm"
+
+
+def test_tolerance_written_with_a_decimal_comma():
+    """"2: 3,14 ± 0,01" must grade against 3.14, not against the tolerance."""
+    key = nb.parse_key("2: 3,14 ± 0,01")
+    assert key["2"]["value"] == 3.14 and key["2"]["tol"] == "0,01"
+    assert nb.is_close(3.14, 3.145, key["2"]["tol"])
+    assert not nb.is_close(3.14, 3.2, key["2"]["tol"])
+
+
+def test_unreadable_tolerance_does_not_crash():
+    assert nb.is_close(42, 42, "oops")
+    assert not nb.is_close(42, 50, "oops")
+
+
+def test_tolerance_written_in_words_or_brackets():
+    """Vietnamese sheets write "(sai so 0,01)", not "± 0,01"."""
+    for line, value, tol in [
+        ("2: 3,14 (sai số 0,01)", 3.14, "0,01"),
+        ("3: 2.5 (tol 0.1)", 2.5, "0.1"),
+        ("4: 1/3 +- 1%", 1 / 3, "1%"),
+        ("5: 42", 42, None),
+        ("6: 3,14 (sai so 0,01)", 3.14, "0,01"),      # no diacritics
+        ("7: 3,14 (SAI SO 0,01)", 3.14, "0,01"),
+    ]:
+        key = nb.parse_key(line)
+        label = next(iter(key))
+        assert abs(key[label]["value"] - value) < 1e-9, (line, key)
+        assert key[label]["tol"] == tol, (line, key)
+
+    # Without this, the tolerance itself was graded as the answer.
+    key = nb.parse_key("2: 3,14 (sai số 0,01)")
+    assert nb.is_close(key["2"]["value"], 3.145, key["2"]["tol"])
+    assert not nb.is_close(key["2"]["value"], 0.01, key["2"]["tol"])

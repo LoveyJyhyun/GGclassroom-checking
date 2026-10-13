@@ -14,6 +14,7 @@ import keyword
 import re
 import tokenize
 from itertools import combinations
+from typing import Callable
 
 from . import llm
 
@@ -76,11 +77,10 @@ LLM_SYSTEM = (
 
 
 def llm_compare(a: str, b: str, assignment: str = "") -> dict:
-    half = llm.MAX_PROMPT_CHARS // 2 - 200
-    prompt = (f"Assignment:\n{assignment or '(not provided)'}\n\n"
-              f"Submission A:\n<<<\n{llm.truncate(a, half)}\n>>>\n\n"
-              f"Submission B:\n<<<\n{llm.truncate(b, half)}\n>>>")
-    data = llm.chat_json(LLM_SYSTEM, prompt)
+    # pack() splits the window between the two submissions and keeps the assignment
+    # text whole, so neither side is cut more than the other.
+    data, trimmed = llm.pack_json(LLM_SYSTEM, [("Assignment", assignment),
+                                               ("Submission A", a), ("Submission B", b)])
     evidence = data.get("evidence") or []
     if isinstance(evidence, str):
         evidence = [evidence]
@@ -89,12 +89,13 @@ def llm_compare(a: str, b: str, assignment: str = "") -> dict:
     except (TypeError, ValueError):
         confidence = None
     return {"copied": bool(data.get("copied")), "confidence": confidence,
-            "evidence": [str(e) for e in evidence][:5]}
+            "evidence": [str(e) for e in evidence][:5], "truncated": trimmed}
 
 
 def find(texts: dict[str, str], code: dict[str, tuple[str, str]] | None = None,
          threshold: float = 0.3, semantic_threshold: float = 0.92,
-         use_embeddings: bool = True, llm_review: int = 5, assignment: str = "") -> dict:
+         use_embeddings: bool = True, llm_review: int = 5, assignment: str = "",
+         on_review: Callable[[str, str], None] | None = None) -> dict:
     """Return suspicious pairs.
 
     texts: student id -> written text
@@ -128,6 +129,8 @@ def find(texts: dict[str, str], code: dict[str, tuple[str, str]] | None = None,
                reverse=True)
 
     for pair in pairs[:llm_review]:
+        if on_review:
+            on_review(pair["a"], pair["b"])
         a_text = "\n".join(filter(None, [texts.get(pair["a"]), code.get(pair["a"], ("", ""))[1]]))
         b_text = "\n".join(filter(None, [texts.get(pair["b"]), code.get(pair["b"], ("", ""))[1]]))
         try:

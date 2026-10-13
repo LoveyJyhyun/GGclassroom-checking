@@ -148,8 +148,13 @@ def run_one(source: str, language: str, stdin: str = "") -> dict:
 
         name = None
         if CODE_RUNNER == "local":
-            cmd, kwargs = spec["local"], {"cwd": work, "preexec_fn": _limits,
-                                          "env": {"PATH": os.environ.get("PATH", ""), "HOME": work}}
+            cmd = spec["local"]
+            kwargs = {"cwd": work,
+                      "env": {"PATH": os.environ.get("PATH", ""), "HOME": work}}
+            # ponytail: rlimits are POSIX-only; on Windows local mode gets just the
+            # wall-clock timeout. Use CODE_RUNNER=docker there (the default).
+            if os.name == "posix":
+                kwargs["preexec_fn"] = _limits
         else:
             name = f"ggc-{uuid.uuid4().hex[:12]}"
             cmd = ["docker", "run", "--rm", "-i", "--name", name, "--network", "none",
@@ -191,14 +196,14 @@ def llm_review(source: str, assignment: str, results: list[dict]) -> dict:
         lines.append(f"Test {i}: {'PASS' if r['passed'] else 'FAIL'}; "
                      f"stdin={r['input'][:200]!r}; expected={str(r['expected'])[:200]!r}; "
                      f"got={r['stdout'][:200]!r}; stderr={r['stderr'][-300:]!r}")
-    prompt = (f"Assignment:\n{assignment or '(not provided)'}\n\n"
-              f"Code:\n<<<\n{source}\n>>>\n\nTest results:\n" + ("\n".join(lines) or "(no tests)"))
-    data = llm.chat_json(REVIEW_SYSTEM, prompt)
+    data, trimmed = llm.pack_json(REVIEW_SYSTEM, [("Assignment", assignment),
+                                                  ("Test results", "\n".join(lines)),
+                                                  ("Code", source)])
     issues = data.get("issues") or []
     if isinstance(issues, str):
         issues = [issues]
     return {"solves_task": bool(data.get("solves_task")), "issues": [str(i) for i in issues][:8],
-            "summary": str(data.get("summary", ""))}
+            "summary": str(data.get("summary", "")), "truncated": trimmed}
 
 
 def check(source: str, language: str, tests: list[dict], assignment: str = "",

@@ -77,9 +77,8 @@ SYSTEM = (
 
 
 def llm_opinion(text: str, assignment: str = "") -> dict:
-    prompt = (f"Assignment:\n{assignment or '(not provided)'}\n\n"
-              f"Student text:\n<<<\n{text}\n>>>")
-    data = llm.chat_json(SYSTEM, prompt)
+    data, trimmed = llm.pack_json(SYSTEM, [("Assignment", assignment),
+                                           ("Student text", text)])
     try:
         likelihood = max(0, min(100, int(float(data.get("likelihood", 0)))))
     except (TypeError, ValueError):
@@ -87,7 +86,8 @@ def llm_opinion(text: str, assignment: str = "") -> dict:
     reasons = data.get("reasons") or []
     if isinstance(reasons, str):
         reasons = [reasons]
-    return {"likelihood": likelihood, "reasons": [str(r) for r in reasons][:6]}
+    return {"likelihood": likelihood, "reasons": [str(r) for r in reasons][:6],
+            "truncated": trimmed}
 
 
 def check(text: str, assignment: str = "", use_llm: bool = True) -> dict:
