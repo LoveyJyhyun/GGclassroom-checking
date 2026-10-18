@@ -205,7 +205,11 @@ def run(cr: Classroom, course_id: str, work_id: str, opts: Options,
         "course_id": course_id,
         "course": {"id": course_id, "name": course.get("name", "")},
         "work": {"id": work_id, "title": work.get("title", ""),
-                 "link": work.get("alternateLink", "")},
+                 "link": work.get("alternateLink", ""),
+                 # For draft-grade proposals: the points the score is scaled to, and
+                 # whether Google will let this app write grades on this assignment.
+                 "max_points": work.get("maxPoints"),
+                 "associated_with_developer": bool(work.get("associatedWithDeveloper"))},
         "options": {"checks": list(opts.checks), "use_llm": opts.use_llm,
                     "model": llm.chat_model() if opts.use_llm else None,
                     "embed_model": llm.embed_model() if opts.use_llm else None,

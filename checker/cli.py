@@ -15,7 +15,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from . import answerkey, checks, llm, results, runner
+from . import agent_tools, answerkey, checks, dify, llm, results, runner, triage
 from . import status as st
 from .classroom import SCOPES, Classroom
 
@@ -175,6 +175,12 @@ def main(argv: list[str] | None = None) -> int:
     p_check.add_argument("--no-llm", action="store_true", help="heuristics only, no Ollama calls")
     p_check.add_argument("--threshold", type=float, default=0.3, help="copy-detection threshold (0-1)")
     p_check.add_argument("--include-unsubmitted", action="store_true")
+    p_check.add_argument("--no-triage", action="store_true",
+                         help="skip the Dify triage agent even when DIFY_TRIAGE_KEY is set")
+    p_triage = sub.add_parser("triage", help="show the follow-up list for a saved report")
+    p_triage.add_argument("--report", default="latest", help="report file name, or 'latest'")
+    p_triage.add_argument("--agent", action="store_true",
+                          help="also run the Dify triage workflow and show its notes")
     args = parser.parse_args(argv)
 
     if args.cmd == "status":
@@ -218,6 +224,18 @@ def main(argv: list[str] | None = None) -> int:
               f"{' (reused from cache)' if built['cached'] else ''}", file=sys.stderr)
         return 0
 
+    if args.cmd == "triage":
+        try:
+            path = agent_tools.resolve(args.report)
+        except agent_tools.ToolError as e:
+            print(e, file=sys.stderr)
+            return 1
+        report = agent_tools.load_report(path)
+        print(triage.with_names(triage.brief_markdown(triage.brief(report, os.path.basename(path))), report))
+        if args.agent:
+            return _run_agent(path, report)
+        return 0
+
     cr = Classroom(credentials())
     if args.cmd == "courses":
         for c in cr.courses():
@@ -250,6 +268,25 @@ def main(argv: list[str] | None = None) -> int:
         csv_path = results.save_csv(report, path[:-len(".json")] + ".csv")
         print(f"\nFull report: {path}")
         print(f"Results CSV: {csv_path}")
+        if dify.configured() and not args.no_triage:
+            return _run_agent(path, report)
+    return 0
+
+
+def _run_agent(path: str, report: dict) -> int:
+    if not dify.configured():
+        print("\nSet DIFY_TRIAGE_KEY (and DIFY_API_URL) to use the triage agent.", file=sys.stderr)
+        return 1
+    print("\nAsking the triage agent (Dify)...", file=sys.stderr)
+    outcome = dify.run_triage(path)
+    if outcome.get("state") != "done":
+        print(f"! Triage failed: {outcome.get('error')}", file=sys.stderr)
+        return 1
+    print("\n-- Agent triage --")
+    print(triage.with_names(outcome.get("text", ""), report))
+    if outcome.get("hold"):
+        print("\nSuggested to hold: " + triage.with_names(", ".join(outcome["hold"]), report))
+    print(f"Review and approve draft grades: {agent_tools.report_url(path)}")
     return 0
 
 

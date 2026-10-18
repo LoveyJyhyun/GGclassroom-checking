@@ -71,3 +71,13 @@ td ul { margin: 0; padding-left: 18px; }
 .runbar::-moz-progress-bar { background: var(--ok-fg); border-radius: 4px; }
 /* No value attribute = still counting the class, so stripe it to read as "working". */
 .runbar:not([value]) { background: repeating-linear-gradient(90deg, var(--line) 0 12px, var(--none) 12px 24px); }
+.linklike { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; }
+.linklike:hover { text-decoration: underline; }
+.linklike:disabled { color: var(--muted); cursor: wait; text-decoration: none; }
+.agent-notes { margin: 12px 0; }
+.agent-notes .desc { margin-top: 4px; }
+.inline-form { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
+.inline-form input[type=number] { width: 80px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; }
+li.sig-high { color: var(--bad-fg); }
+li.sig-info { color: var(--muted); }
+code { font-size: .9em; background: var(--none); padding: 0 4px; border-radius: 4px; }

@@ -25,6 +25,8 @@ services:
       CODE_WORK_DIR: /tmp/ggc-runs
       OAUTH_PORT: "8765"
       OAUTH_NO_BROWSER: "1"
+      # Dify running on this computer (its own docker compose, port 80).
+      DIFY_API_URL: http://host.docker.internal/v1
     volumes:
       - ./secrets:/secrets:ro
       - ./data:/data

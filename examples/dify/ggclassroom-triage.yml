@@ -1,0 +1,391 @@
+# Dify workflow for GGClassroom Checker. Import: Studio -> Import DSL file.
+# Setup steps are in the note on the canvas and in the README (Triage agent).
+app:
+  description: 'Triages a GGClassroom check report on a local model: who needs action, why, class picture, and which draft grades to hold for the teacher.'
+  icon: 🧑‍🏫
+  icon_background: '#E4FBCC'
+  icon_type: emoji
+  mode: workflow
+  name: GGClassroom triage
+  use_icon_as_answer_icon: false
+dependencies:
+- current_identifier: null
+  type: marketplace
+  value:
+    marketplace_plugin_unique_identifier: langgenius/ollama:1.0.2@ef203a332d1b2b8952dbaa012be70be3e0a2d576b001489fb3b070efc970ffbe
+    version: null
+kind: app
+version: 0.7.0
+workflow:
+  conversation_variables: []
+  environment_variables: []
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    sensitive_word_avoidance:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+  graph:
+    edges:
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: start
+        targetType: tool
+      id: 1760900000001-source-1760900000002-target
+      selected: false
+      source: '1760900000001'
+      sourceHandle: source
+      target: '1760900000002'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: tool
+        targetType: llm
+      id: 1760900000002-source-1760900000003-target
+      selected: false
+      source: '1760900000002'
+      sourceHandle: source
+      target: '1760900000003'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: llm
+        targetType: code
+      id: 1760900000003-source-1760900000004-target
+      selected: false
+      source: '1760900000003'
+      sourceHandle: source
+      target: '1760900000004'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: code
+        targetType: tool
+      id: 1760900000004-source-1760900000005-target
+      selected: false
+      source: '1760900000004'
+      sourceHandle: source
+      target: '1760900000005'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    - data:
+        isInIteration: false
+        isInLoop: false
+        sourceType: tool
+        targetType: end
+      id: 1760900000005-source-1760900000006-target
+      selected: false
+      source: '1760900000005'
+      sourceHandle: source
+      target: '1760900000006'
+      targetHandle: target
+      type: custom
+      zIndex: 0
+    nodes:
+    - data:
+        desc: ''
+        selected: false
+        title: Start
+        type: start
+        variables:
+        - default: latest
+          label: Report file (or latest)
+          max_length: 200
+          options: []
+          required: false
+          type: text-input
+          variable: report
+        - default: Vietnamese
+          label: Language of the notes
+          max_length: 48
+          options: []
+          required: false
+          type: text-input
+          variable: language
+      height: 116
+      id: '1760900000001'
+      position:
+        x: 30
+        y: 300
+      positionAbsolute:
+        x: 30
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        desc: ''
+        provider_id: ggclassroom
+        provider_name: GGClassroom Checker
+        provider_type: mcp
+        retry_config:
+          max_retries: 2
+          retry_enabled: true
+          retry_interval: 1500
+        selected: false
+        title: Read triage brief
+        tool_configurations: {}
+        tool_label: Triage brief for a report
+        tool_name: triage_brief
+        tool_node_version: '2'
+        tool_parameters:
+          report:
+            type: mixed
+            value: '{{#1760900000001.report#}}'
+        type: tool
+      height: 90
+      id: '1760900000002'
+      position:
+        x: 330
+        y: 300
+      positionAbsolute:
+        x: 330
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        context:
+          enabled: false
+          variable_selector: []
+        desc: ''
+        model:
+          provider: langgenius/ollama/ollama
+          name: qwen3:30B
+          mode: chat
+          completion_params:
+            temperature: 0.2
+            think: false
+        prompt_template:
+        - id: fecc8918-42ab-49fa-9ffc-c06d23acd87d
+          role: system
+          text: 'You are a careful teaching assistant. A teacher has just checked one assignment, and software has turned the results into the triage brief you are given. Students appear only as codes (S01, S02, ...). Refer to them only by those codes.
+
+
+            Write the teacher''s follow-up notes in {{#1760900000001.language#}} (if that is empty, write in Vietnamese), in Markdown, with these sections:
+
+
+            ## 1. Act first
+
+            One bullet per student under "Needs action": the code, what the checks found (quote the numbers from the brief), and one concrete next step, such as asking both students to explain their work in person, asking for a readable file, or re-marking a question by hand.
+
+
+            ## 2. Worth a look
+
+            The same for "Worth a look", shorter.
+
+
+            ## 3. Class picture
+
+            2-4 bullets: how scores are spread, which questions were missed most and might need re-teaching, and anything that affects many students (unreadable files, work cut short).
+
+
+            ## 4. Message draft
+
+            Only if a student needs to explain an overlap: one short, friendly, neutral message the teacher could send, inviting them to talk through their work. Never accusing.
+
+
+            Rules
+
+            - Copying and AI-writing results are leads, never proof. Never say a student cheated or used AI. Say what the check found and suggest a conversation.
+
+            - Use only facts from the brief. Do not invent numbers, reasons or students.
+
+            - Be brief: the teacher should finish reading in two minutes.
+
+            - End with exactly one line: HOLD: followed by the codes whose draft grade should wait for the teacher, comma-separated, or HOLD: none. Hold a grade only when saving the mark now could be wrong or unfair: a high copying signal, or work that was cut short. Do not hold a grade for AI-writing indicators alone or for a low score alone.'
+        - id: 0589ed96-7645-4fad-b599-e87bb35e7942
+          role: user
+          text: '{{#1760900000002.text#}}'
+        reasoning_format: separated
+        retry_config:
+          max_retries: 1
+          retry_enabled: true
+          retry_interval: 3000
+        selected: false
+        structured_output_enabled: false
+        title: Write follow-up notes
+        type: llm
+        variables: []
+        vision:
+          enabled: false
+      height: 90
+      id: '1760900000003'
+      position:
+        x: 630
+        y: 300
+      positionAbsolute:
+        x: 630
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        code: "\nimport re\n\n\ndef main(text: str) -> dict:\n    \"\"\"Separate the HOLD line from the notes; keep only well-formed student codes.\"\"\"\n    text = re.sub(r\"<think>.*?</think>\", \"\", text or \"\", flags=re.S).strip()\n    lines = text.splitlines()\n    hold = \"\"\n    for i in range(len(lines) - 1, -1, -1):\n        line = lines[i].strip().strip(\"*`_\").strip()\n        if line.upper().startswith(\"HOLD:\"):\n            codes = re.findall(r\"\\bS\\d{2,3}\\b\", line.upper())\n            hold = \", \".join(dict.fromkeys(codes))\n            del lines[i]\n            break\n    notes = \"\\n\".join(lines).strip()\n    if not notes:\n        notes = \"The agent wrote no notes; see the follow-up list on the report page.\"\n    return {\"triage\": notes, \"hold\": hold}\n"
+        code_language: python3
+        desc: ''
+        outputs:
+          triage:
+            children: null
+            type: string
+          hold:
+            children: null
+            type: string
+        selected: false
+        title: Separate grade holds
+        type: code
+        variables:
+        - value_selector:
+          - '1760900000003'
+          - text
+          variable: text
+      height: 54
+      id: '1760900000004'
+      position:
+        x: 930
+        y: 300
+      positionAbsolute:
+        x: 930
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        desc: ''
+        provider_id: ggclassroom
+        provider_name: GGClassroom Checker
+        provider_type: mcp
+        retry_config:
+          max_retries: 2
+          retry_enabled: true
+          retry_interval: 1500
+        selected: false
+        title: Save for the teacher
+        tool_configurations: {}
+        tool_label: Save the triage for the teacher
+        tool_name: save_triage
+        tool_node_version: '2'
+        tool_parameters:
+          report:
+            type: mixed
+            value: '{{#1760900000001.report#}}'
+          triage:
+            type: mixed
+            value: '{{#1760900000004.triage#}}'
+          hold:
+            type: mixed
+            value: '{{#1760900000004.hold#}}'
+        type: tool
+      height: 90
+      id: '1760900000005'
+      position:
+        x: 1230
+        y: 300
+      positionAbsolute:
+        x: 1230
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        desc: ''
+        outputs:
+        - value_selector:
+          - '1760900000004'
+          - triage
+          value_type: string
+          variable: triage
+        - value_selector:
+          - '1760900000004'
+          - hold
+          value_type: string
+          variable: hold
+        - value_selector:
+          - '1760900000005'
+          - text
+          value_type: string
+          variable: saved
+        selected: false
+        title: End
+        type: end
+      height: 142
+      id: '1760900000006'
+      position:
+        x: 1530
+        y: 300
+      positionAbsolute:
+        x: 1530
+        y: 300
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom
+      width: 242
+      zIndex: 0
+    - data:
+        author: ''
+        desc: ''
+        height: 300
+        selected: false
+        showAuthor: false
+        text: '{"root": {"children": [{"children": [{"detail": 0, "format": 1, "mode": "normal", "style": "", "text": "GGClassroom triage (runs on your local model)", "type": "text", "version": 1}], "direction": "ltr", "format": "", "indent": 0, "type": "paragraph", "version": 1, "textFormat": 0, "textStyle": ""}, {"children": [{"detail": 0, "format": 0, "mode": "normal", "style": "", "text": "1. In Dify: Tools → MCP → Add MCP server (HTTP). Name: GGClassroom Checker. Server identifier: ggclassroom. URL: http://host.docker.internal:8080/agent/mcp. Header: Authorization = Bearer <your AGENT_TOKEN>.", "type": "text", "version": 1}], "direction": "ltr", "format": "", "indent": 0, "type": "paragraph", "version": 1, "textFormat": 0, "textStyle": ""}, {"children": [{"detail": 0, "format": 0, "mode": "normal", "style": "", "text": "2. Publish this workflow, open API Access, create an API key and put it in the checker''s .env as DIFY_TRIAGE_KEY. The checker then starts this workflow after every check run.", "type": "text", "version": 1}], "direction": "ltr", "format": "", "indent": 0, "type": "paragraph", "version": 1, "textFormat": 0, "textStyle": ""}, {"children": [{"detail": 0, "format": 0, "mode": "normal", "style": "", "text": "Student work never reaches the model: the brief has codes (S01 ...), scores and signals only. Keep the model local anyway.", "type": "text", "version": 1}], "direction": "ltr", "format": "", "indent": 0, "type": "paragraph", "version": 1, "textFormat": 0, "textStyle": ""}, {"children": [{"detail": 0, "format": 0, "mode": "normal", "style": "", "text": "Grades are never saved from here. save_triage only proposes them; the teacher approves on the report page.", "type": "text", "version": 1}], "direction": "ltr", "format": "", "indent": 0, "type": "paragraph", "version": 1, "textFormat": 0, "textStyle": ""}], "direction": "ltr", "format": "", "indent": 0, "type": "root", "version": 1}}'
+        theme: blue
+        title: ''
+        type: ''
+        width: 560
+      height: 300
+      id: '1760900000007'
+      position:
+        x: 30
+        y: -40
+      positionAbsolute:
+        x: 30
+        y: -40
+      selected: false
+      sourcePosition: right
+      targetPosition: left
+      type: custom-note
+      width: 560
+      zIndex: 0
+    viewport:
+      x: 60
+      y: 120
+      zoom: 0.8
+  rag_pipeline_variables: []

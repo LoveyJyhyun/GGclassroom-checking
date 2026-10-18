@@ -15,6 +15,109 @@
 
 {% for e in report.errors %}<div class="warn">{{ e }}</div>{% endfor %}
 
+{% set needs = follow_up|selectattr('tier', 'ne', 'ok')|list %}
+<section id="follow-up">
+<div class="bar">
+  <h2>Follow-up <span class="muted small">who to look at first; copying and AI signals are leads, never proof</span></h2>
+  {% if dify_on %}
+  <form method="post" action="{{ url_for('report_triage', filename=report_file) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="linklike" {% if agent and agent.state == 'running' %}disabled{% endif %}>
+      {{ 'Triage again' if agent and agent.state in ('done', 'failed') else 'Triage with the agent' }}</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if agent and agent.state == 'running' %}
+  <div class="status-box"><progress class="runbar"></progress>
+    <div><strong>The triage agent is reading this report…</strong>
+    <span class="muted small">This page refreshes when it is done.</span></div></div>
+  <script>setTimeout(() => location.reload(), 8000);</script>
+{% elif agent and agent.state == 'failed' %}
+  <div class="warn">The triage agent did not finish: {{ agent.error }}</div>
+{% elif agent and agent.state == 'done' %}
+  <div class="agent-notes">
+    <div class="muted small">Agent triage · {{ agent.updated_at[:16].replace('T', ' ') }}{% if agent.hold %} · suggests holding {{ agent.hold|length }} grade(s){% endif %}</div>
+    <div class="desc">{{ agent.text }}</div>
+  </div>
+{% endif %}
+
+{% if needs %}
+<table class="list">
+  <thead><tr><th>Student</th><th>Priority</th><th>Score</th><th>Why</th></tr></thead>
+  <tbody>
+  {% for p in needs %}
+    <tr>
+      <td>{{ p.name }}<div class="muted small">{{ p.code }} · {{ p.status }}</div></td>
+      <td><span class="tag {{ 'missing' if p.tier == 'act' else 'late' }}">{{ tier_labels[p.tier] }}</span></td>
+      <td>{{ '—' if p.score is none else p.score ~ '%' }}</td>
+      <td class="small"><ul>{% for s in p.signals %}<li class="sig-{{ s.level }}">{{ s.kind }}: {{ s.text }}</li>{% endfor %}</ul></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% set fine = follow_up|selectattr('tier', 'eq', 'ok')|list %}
+{% if fine %}<p class="small muted">No concerns: {% for p in fine %}{{ p.name }}{{ ', ' if not loop.last }}{% endfor %}</p>{% endif %}
+</section>
+
+{% if proposal or (report.scores and report.scores.values()|select|list) %}
+<section id="draft-grades">
+<h2>Draft grades <span class="muted small">score × points, saved to Classroom only when you approve</span></h2>
+{% if proposal %}
+  {% set saveable = proposal.can_save is not sameas false %}
+  {% if not saveable %}
+    <div class="warn">Google only lets an app save grades on assignments that the same app created.
+      This one was made in Classroom, so enter the grades there yourself:
+      <a href="{{ url_for('grades_csv', filename=report_file) }}">download them as CSV</a>.</div>
+  {% elif not can_write %}
+    <div class="warn">To save these as draft grades in Classroom, start the app with
+      <code>GRADE_WRITE=1</code> and sign in again{{ '' if grade_write else ' (it is off now)' }}.</div>
+  {% endif %}
+  <form method="post" action="{{ url_for('grades_apply', filename=report_file) }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <table class="list">
+      <thead><tr><th>Save</th><th>Student</th><th>Score</th><th>Draft grade</th><th>Note</th></tr></thead>
+      <tbody>
+      {% for r in proposal.rows %}
+        <tr>
+          <td><input type="checkbox" name="approve" value="{{ r.uid }}"
+              {% if r.result == 'saved' %}checked disabled{% elif not r.held %}checked{% endif %}
+              {% if not (can_write and saveable) %}disabled{% endif %}></td>
+          <td>{{ r.name }}</td>
+          <td>{{ r.percent }}%</td>
+          <td><strong>{{ '%g'|format(r.grade) }}</strong> <span class="muted small">/ {{ '%g'|format(proposal.max_points) }}</span></td>
+          <td class="small">{% if r.held %}<span class="tag late">held</span> {{ triage_names(r.reason)|truncate(140) }}{% endif %}
+            {% if r.result == 'saved' %}<span class="tag graded">saved</span>{% elif r.result and r.result.startswith('error') %}<span class="tag missing">{{ r.result }}</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      {% for u in proposal.unmarked %}
+        <tr class="muted"><td></td><td>{{ u.name }}</td><td colspan="3" class="small">no grade proposed: {{ u.why }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p class="small muted">Proposed by {{ 'the agent' if proposal.created_by == 'agent' else 'you' }} ·
+      {{ proposal.created_at[:16].replace('T', ' ') }} · rounded to {{ '%g'|format(proposal.step) }}
+      {% if proposal.applied_at %}· last saved {{ proposal.applied_at[:16].replace('T', ' ') }}{% endif %}</p>
+    <div class="bar">
+      <div>
+        {% if can_write and saveable %}<button class="button">Save ticked draft grades to Classroom</button>{% endif %}
+        <a href="{{ url_for('grades_csv', filename=report_file) }}">Download CSV</a>
+      </div>
+    </div>
+  </form>
+{% endif %}
+{% if not proposal or proposal.status == 'pending' %}
+  <form method="post" action="{{ url_for('grades_propose', filename=report_file) }}" class="inline-form">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Out of <input type="number" name="max_points" min="1" step="any" required
+      value="{{ '%g'|format(proposal.max_points) if proposal else ('%g'|format(work.max_points) if work.max_points else '') }}"> points</label>
+    <button class="linklike">{{ 'Recalculate' if proposal else 'Propose draft grades' }}</button>
+  </form>
+{% endif %}
+</section>
+{% endif %}
+
 {% if report.scores and report.scores.values()|select|list %}
 <h2>Final score <span class="muted small">from the answer sheet only; copying, AI and code results are listed below but not marked</span></h2>
 {% set labels = report.question_labels or (report.numbers.key|list if report.numbers else []) %}

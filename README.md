@@ -25,6 +25,14 @@ computer: it goes from Google to your machine and is never sent to a cloud AI se
 
 Every check run is saved as JSON in `reports/` so you can open it again later.
 
+**After the checks (optional)**
+
+| | How it works |
+|---|---|
+| **Follow-up list** | Every report opens with who to look at first: *Needs action* (likely copying, nothing readable), *Worth a look* (AI-writing indicators, failing code, low score, work cut short) and *No concerns*, each with the reason. Worked out in Python from the report, no LLM. |
+| **Triage agent** | A [Dify](https://dify.ai) workflow on your local Qwen reads that list after every run and writes short follow-up notes: what to do first, what the class missed, and a neutral message draft. It talks to the checker through an MCP server and only ever sees students as codes (S01, S02 …), never names, emails or answers. See [section 6](#6-triage-agent-dify--mcp). |
+| **Draft grades** | Score × the assignment's points, proposed for the class. The agent may suggest holding some (a likely copy); you tick which ones to save and press the button. Nothing is written to Classroom without that. |
+
 ## 1. Google Cloud setup (one time)
 
 1. Go to <https://console.cloud.google.com/>, create a project (any name).
@@ -190,7 +198,82 @@ docker exec ggc python -m checker.cli answerkey --file examples/model_answer.md
 docker exec ggc python -m checker.cli status
 ```
 
-## How a check run works
+## 6. Triage agent (Dify + MCP)
+
+After every check run the checker starts a Dify workflow. The workflow reads the
+run's follow-up list through the checker's MCP server, has your local model write the
+notes, and saves them back with a draft-grade proposal. The report page shows them as
+soon as they land; the page refreshes by itself while the agent is working.
+
+```
+check run ──► report ──► Dify workflow ──MCP──► triage_brief   (codes only)
+                              │ local Qwen writes the notes
+                              └──────MCP──► save_triage ──► report page: notes + draft grades
+                                                                  │ you tick and approve
+                                                                  ▼
+                                                       Google Classroom (draft grades)
+```
+
+**What the agent can and cannot do.** Its tools are `list_reports`, `triage_brief`,
+`student_detail`, `grade_proposal` (read only) and `save_triage` (stores its notes and
+proposes grades). None of them reaches Google: saving grades happens only when you press
+the button on the report page, in your own session. The brief contains codes, scores and
+signals, never names, emails or student answers, and names in quoted evidence are
+replaced with codes too. Keep the model local anyway: the workflow ships set to
+`qwen3:30B` on Ollama.
+
+**Set it up (once)**
+
+1. In the checker's `.env`, set a long random `AGENT_TOKEN` (e.g. `openssl rand -hex 32`).
+   Running the checker with `python app.py`? Also set `HOST=0.0.0.0`, so Dify's containers
+   can reach it.
+2. Dify blocks requests to your own computer by default. In **Dify's** `docker/.env` add
+   `SSRF_PROXY_ALLOW_PRIVATE_DOMAINS=host.docker.internal`, then `docker compose up -d`
+   in Dify's `docker/` folder.
+3. In Dify: **Tools → MCP → Add MCP server (HTTP)**
+   - Name: `GGClassroom Checker` · Server identifier: **`ggclassroom`** (the workflow finds the tools by this)
+   - Server URL: `http://host.docker.internal:8080/agent/mcp`
+   - Header: `Authorization` = `Bearer <your AGENT_TOKEN>`
+
+   Dify should list the five tools.
+4. **Studio → Import DSL file** → `examples/dify/ggclassroom-triage.yml`. Check that the
+   *Write follow-up notes* node uses your local model, then **Publish**.
+5. In the workflow: **API Access → API Key → Create**. Put the key in the checker's `.env`
+   as `DIFY_TRIAGE_KEY` (and `DIFY_API_URL=http://localhost/v1` when the checker runs
+   outside Docker). Restart the checker.
+
+From now on every check is triaged. The report page also has **Triage again**, and the
+command line has
+
+```bash
+python -m checker.cli triage                     # the follow-up list for the newest report
+python -m checker.cli triage --report <file> --agent    # and the agent's notes
+```
+
+`check` triages automatically when `DIFY_TRIAGE_KEY` is set (`--no-triage` to skip).
+
+The same tools work from any MCP client, for example a Dify chat agent where you ask
+"which students in Lab 3 should I talk to?", or Claude Code
+(`claude mcp add --transport http ggclassroom http://localhost:8080/agent/mcp --header "Authorization: Bearer <token>"`).
+Without MCP, `POST /agent/tools/<name>` with a JSON body and the same header does the same.
+
+### Draft grades
+
+The **Draft grades** section of a report proposes score × points for every marked
+student (unreadable work gets no proposal). Untick anyone you are not sure about, press
+**Save ticked draft grades to Classroom**, and each student's result is shown next to
+their name. Draft grades are visible only to you until you return the work in Classroom.
+
+Saving needs two things:
+
+- **Permission.** Start the checker with `GRADE_WRITE=1` and sign in again. Google then asks
+  for "view and manage coursework and grades" instead of view-only. Add the scope
+  `.../auth/classroom.coursework.students` to your OAuth consent screen first.
+- **An assignment this app created.** Google lets an app write grades only on coursework
+  made by the same Google Cloud project. Assignments created on the Classroom website
+  cannot be written by any outside app. The page says so and offers
+  **Download CSV** with the proposed grades to type in instead.
+
 
 The four checks always run in this order, and each one is a separate set of small LLM
 calls - nothing accumulates into one growing conversation:
@@ -337,6 +420,12 @@ All settings are environment variables (see `.env.example`):
 | `CODE_TIMEOUT` | `10` | seconds per test case |
 | `CODE_MEMORY_MB` | `256` | memory per run |
 | `PYTHON_IMAGE` / `NODE_IMAGE` | `python:3.12-slim` / `node:20-slim` | sandbox images |
+| `AGENT_TOKEN` | *(off)* | turns on the MCP server at `/agent/mcp`; clients send it as a Bearer token |
+| `APP_BASE_URL` | `http://localhost:8080` | used in the review links the agent hands back |
+| `DIFY_API_URL` / `DIFY_TRIAGE_KEY` | `http://localhost/v1` / *(off)* | the triage workflow; with a key, every run is triaged |
+| `DIFY_TIMEOUT` / `TRIAGE_LANGUAGE` | `900` / `Vietnamese` | seconds to wait for the workflow; language of its notes |
+| `GRADE_WRITE` | `0` | `1` asks Google for permission to save draft grades |
+| `GRADE_STEP` | `0.1` | draft grades are rounded to this |
 
 ## Code sandbox
 
@@ -381,6 +470,12 @@ checker/numbers.py     answer-key checking
 checker/aidetect.py    AI-writing indicators
 checker/runner.py      sandboxed code execution
 checker/llm.py         Ollama client, context-window packing
+checker/triage.py      follow-up list from a report, student codes, stored agent notes
+checker/grades.py      draft-grade proposals, approval, saving to Classroom
+checker/agent_tools.py the agent's tools (shared by MCP and the JSON API)
+checker/mcp.py         MCP server (Streamable HTTP, JSON replies, stdlib only)
+checker/dify.py        starts the Dify triage workflow after a run
 checker/cli.py         command line
+examples/dify/         the Dify triage workflow to import
 templates/, static/    web UI (incl. the progress page)
 ```

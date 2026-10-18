@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import csv
+import hmac
 import io
 import json
 import os
 import re
+import secrets
 import threading
 import uuid
 from collections import Counter
 from functools import wraps
 
-from flask import (Flask, Response, abort, redirect, render_template, request,
+from flask import (Flask, Response, abort, jsonify, redirect, render_template, request,
                    send_from_directory, session, url_for)
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -19,9 +21,9 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.errors import HttpError
 
-from checker import answerkey, checks, llm, results, runner
+from checker import agent_tools, answerkey, checks, dify, grades, llm, mcp, results, runner, triage
 from checker import status as st
-from checker.classroom import SCOPES, Classroom
+from checker.classroom import GRADE_WRITE, SCOPES, Classroom, can_write_grades
 
 # Google may return previously granted scopes too; don't treat that as an error.
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
@@ -331,6 +333,11 @@ def start_job(creds, course_id: str, work_id: str, opts: checks.Options) -> str:
         except Exception as e:                  # noqa: BLE001 - a thread must not die silently
             state["state"] = "error"
             state["error"] = f"{type(e).__name__}: {e}"
+            return
+        # The report is ready and the browser moves on to it; the agent's triage
+        # follows in the same thread and the report page shows it when it lands.
+        if dify.configured():
+            state["triage"] = dify.run_triage(path).get("state")
 
     threading.Thread(target=worker, daemon=True, name=f"check-{job_id}").start()
     return job_id
@@ -372,12 +379,178 @@ def _load_report(filename: str) -> dict:
         return json.load(fh)
 
 
+def _report_path(filename: str) -> str:
+    return os.path.join(os.path.abspath(checks.REPORTS_DIR), filename)
+
+
+def _csrf_token() -> str:
+    if "csrf" not in session:
+        session["csrf"] = secrets.token_urlsafe(24)
+    return session["csrf"]
+
+
+def _check_csrf() -> None:
+    sent = request.form.get("csrf", "")
+    if not sent or not hmac.compare_digest(sent, session.get("csrf", "")):
+        abort(400, "This form has expired. Reload the page and try again.")
+
+
+def _session_can_write() -> bool:
+    return can_write_grades((session.get("credentials") or {}).get("scopes"))
+
+
+def _follow_up(report: dict) -> list[dict]:
+    """The deterministic triage, with names put back for the teacher."""
+    b = triage.brief(report)
+    uid_of = {c: u for u, c in triage.codes(report).items()}
+    rows = []
+    for p in b["students"]:
+        uid = uid_of[p["code"]]
+        rows.append({**p, "uid": uid, "name": report["students"][uid]["name"],
+                     "signals": [{**s, "text": triage.with_names(s["text"], report)}
+                                 for s in p["signals"]]})
+    return rows
+
+
 @app.route("/report/<filename>")
 def report_page(filename: str):
     report = _load_report(filename)
+    path = _report_path(filename)
+    agent = triage.load_triage(path)
+    if agent and agent.get("text"):
+        agent = {**agent, "text": triage.with_names(agent["text"], report)}
     return render_template("report.html", course=report.get("course") or {"id": report["course_id"]},
                            work=report["work"], report=report,
-                           report_file=filename, labels=st.LABELS)
+                           report_file=filename, labels=st.LABELS,
+                           follow_up=_follow_up(report), codes=triage.codes(report),
+                           tier_labels=triage.TIER_LABELS, agent=agent,
+                           proposal=grades.load(path), grade_write=GRADE_WRITE,
+                           can_write=_session_can_write(), dify_on=dify.configured(),
+                           triage_names=lambda text: triage.with_names(text, report),
+                           csrf=_csrf_token())
+
+
+@app.route("/report/<filename>/triage", methods=["POST"])
+def report_triage(filename: str):
+    _load_report(filename)
+    _check_csrf()
+    if not dify.configured():
+        abort(400, "Set DIFY_TRIAGE_KEY to use the triage agent.")
+    path = _report_path(filename)
+    triage.write_triage(path, state="running", error=None)
+    threading.Thread(target=dify.run_triage, args=(path,), daemon=True,
+                     name=f"triage-{filename[:20]}").start()
+    return redirect(url_for("report_page", filename=filename) + "#follow-up")
+
+
+@app.route("/report/<filename>/grades/propose", methods=["POST"])
+def grades_propose(filename: str):
+    report = _load_report(filename)
+    _check_csrf()
+    path = _report_path(filename)
+    existing = grades.load(path)
+    if existing and existing.get("status") != grades.PENDING:
+        abort(400, "Draft grades were already saved for this report.")
+    try:
+        max_points = float(request.form.get("max_points") or 0) or None
+    except ValueError:
+        max_points = None
+    # Keep any holds the agent asked for when the teacher re-proposes.
+    held = {r["uid"]: r["reason"] for r in (existing or {}).get("rows", []) if r["held"]}
+    try:
+        grades.save(path, grades.propose(report, max_points, hold=held))
+    except ValueError as e:
+        abort(400, str(e))
+    return redirect(url_for("report_page", filename=filename) + "#draft-grades")
+
+
+@app.route("/report/<filename>/grades/apply", methods=["POST"])
+@login_required
+def grades_apply(cr: Classroom, filename: str):
+    _load_report(filename)
+    _check_csrf()
+    if not _session_can_write():
+        abort(403, "Sign in with grade access (GRADE_WRITE=1) to save draft grades.")
+    path = _report_path(filename)
+    proposal = grades.load(path)
+    if not proposal:
+        abort(404)
+    approved = set(request.form.getlist("approve"))
+    grades.save(path, grades.apply(cr, proposal, approved))
+    return redirect(url_for("report_page", filename=filename) + "#draft-grades")
+
+
+@app.route("/report/<filename>/grades.csv")
+def grades_csv(filename: str):
+    _load_report(filename)
+    proposal = grades.load(_report_path(filename))
+    if not proposal:
+        abort(404)
+    name = filename[:-len(".json")] + "_draft-grades.csv"
+    return Response("﻿" + grades.to_csv(proposal), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+# --- Agent tools (MCP) --------------------------------------------------------
+
+# Off unless AGENT_TOKEN is set. Anything holding the token can read every saved
+# report (students as codes only) and propose draft grades, so keep it secret and
+# keep this port on your own machine or network.
+AGENT_TOKEN = os.environ.get("AGENT_TOKEN", "")
+
+
+def _agent_allowed() -> bool:
+    if not AGENT_TOKEN:
+        abort(404)
+    # Header only: a token in the URL would end up in access logs.
+    sent = request.headers.get("Authorization", "")
+    sent = sent[7:].strip() if sent.lower().startswith("bearer ") else ""
+    return bool(sent) and hmac.compare_digest(sent, AGENT_TOKEN)
+
+
+@app.route("/agent/mcp", methods=["GET", "POST", "DELETE"])
+def agent_mcp():
+    if not _agent_allowed():
+        return jsonify(mcp.error_response(None, -32001, "Unauthorized")), 401
+    if request.method != "POST":
+        # No server-to-client stream and no sessions to end: allowed by the spec.
+        return Response(status=405, headers={"Allow": "POST"})
+    try:
+        body = json.loads(request.get_data(as_text=True) or "null")
+    except ValueError:
+        return jsonify(mcp.error_response(None, mcp.PARSE_ERROR, "Parse error")), 400
+    try:
+        reply = mcp.handle_body(body)
+    except Exception as e:                       # noqa: BLE001 - answer, don't 500
+        msg_id = body.get("id") if isinstance(body, dict) else None
+        reply = mcp.error_response(msg_id, -32603, f"Internal error: {type(e).__name__}: {e}")
+    if reply is None:
+        return Response(status=202)
+    resp = jsonify(reply)
+    if isinstance(body, dict) and body.get("method") == "initialize":
+        resp.headers["Mcp-Session-Id"] = uuid.uuid4().hex     # stateless, but some clients log it
+    return resp
+
+
+@app.route("/agent/tools")
+def agent_tool_list():
+    if not _agent_allowed():
+        abort(401)
+    return jsonify({"tools": mcp.tool_list()})
+
+
+@app.route("/agent/tools/<name>", methods=["POST"])
+def agent_tool_call(name: str):
+    """The same tools as plain JSON, for curl, n8n or a Dify HTTP node."""
+    if not _agent_allowed():
+        abort(401)
+    if name not in agent_tools.TOOLS:
+        abort(404)
+    try:
+        text, data = agent_tools.call(name, request.get_json(silent=True) or {})
+    except agent_tools.ToolError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"text": text, "data": data})
 
 
 @app.route("/report/<filename>/csv")

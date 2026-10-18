@@ -1,19 +1,33 @@
 """Thin wrapper around the Google Classroom and Drive APIs."""
 from __future__ import annotations
 
+import os
+
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from . import documents
 
+COURSEWORK_READ = "https://www.googleapis.com/auth/classroom.coursework.students.readonly"
+# The only write permission the app can ask for: draft grades on student work.
+# Off unless GRADE_WRITE=1, and even then grades are saved only when the teacher
+# approves them on the report page.
+COURSEWORK_WRITE = "https://www.googleapis.com/auth/classroom.coursework.students"
+GRADE_WRITE = os.environ.get("GRADE_WRITE") == "1"
+
 SCOPES = [
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.rosters.readonly",
     "https://www.googleapis.com/auth/classroom.profile.emails",
-    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+    COURSEWORK_WRITE if GRADE_WRITE else COURSEWORK_READ,
     # Needed to read the contents of files students attach.
     "https://www.googleapis.com/auth/drive.readonly",
 ]
+
+
+def can_write_grades(scopes) -> bool:
+    """Whether a signed-in session was granted the draft-grade permission."""
+    return COURSEWORK_WRITE in (scopes or [])
 
 TEXT_EXPORTS = {
     "application/vnd.google-apps.document": "text/plain",
@@ -81,6 +95,16 @@ class Classroom:
     def submission(self, course_id: str, work_id: str, sub_id: str) -> dict:
         return (self.api.courses().courseWork().studentSubmissions()
                 .get(courseId=course_id, courseWorkId=work_id, id=sub_id).execute())
+
+    def set_draft_grade(self, course_id: str, work_id: str, sub_id: str, grade: float) -> dict:
+        """Save a draft grade (visible to the teacher only until they return the work).
+
+        Google allows this only for coursework created by this app's Cloud project;
+        for anything else it answers 403, which the caller reports per student.
+        """
+        return (self.api.courses().courseWork().studentSubmissions()
+                .patch(courseId=course_id, courseWorkId=work_id, id=sub_id,
+                       updateMask="draftGrade", body={"draftGrade": grade}).execute())
 
     def file_text(self, file_id: str) -> tuple[str | None, str]:
         """Return (text, note). text is None when the file can't be read as text."""
