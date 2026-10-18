@@ -22,17 +22,27 @@
   {% if dify_on %}
   <form method="post" action="{{ url_for('report_triage', filename=report_file) }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button class="linklike" {% if agent and agent.state == 'running' %}disabled{% endif %}>
-      {{ 'Triage again' if agent and agent.state in ('done', 'failed') else 'Triage with the agent' }}</button>
+    <button class="linklike">{{ 'Triage again' if agent else 'Triage with the agent' }}</button>
   </form>
   {% endif %}
 </div>
 
 {% if agent and agent.state == 'running' %}
-  <div class="status-box"><progress class="runbar"></progress>
+  <div class="status-box" id="triage-running"><progress class="runbar"></progress>
     <div><strong>The triage agent is reading this report…</strong>
-    <span class="muted small">This page refreshes when it is done.</span></div></div>
-  <script>setTimeout(() => location.reload(), 8000);</script>
+    <span class="muted small" id="triage-note">Its notes appear here when it is done; you can keep working meanwhile.</span></div></div>
+  <script>
+  // Poll quietly instead of reloading, so ticked boxes below are never lost.
+  (function poll() {
+    fetch({{ url_for('report_triage_state', filename=report_file)|tojson }})
+      .then(r => r.json()).then(s => {
+        if (s.state === 'running') { setTimeout(poll, 5000); return; }
+        document.getElementById('triage-note').innerHTML =
+          'Finished. <a href="#follow-up" onclick="location.reload()">Show the notes</a>';
+        document.querySelector('#triage-running progress').remove();
+      }).catch(() => setTimeout(poll, 10000));
+  })();
+  </script>
 {% elif agent and agent.state == 'failed' %}
   <div class="warn">The triage agent did not finish: {{ agent.error }}</div>
 {% elif agent and agent.state == 'done' %}
@@ -76,6 +86,7 @@
   {% endif %}
   <form method="post" action="{{ url_for('grades_apply', filename=report_file) }}">
     <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="revision" value="{{ proposal.revision }}">
     <table class="list">
       <thead><tr><th>Save</th><th>Student</th><th>Score</th><th>Draft grade</th><th>Note</th></tr></thead>
       <tbody>
@@ -107,7 +118,7 @@
     </div>
   </form>
 {% endif %}
-{% if not proposal or proposal.status == 'pending' %}
+{% if not proposal or not (proposal.rows|selectattr('result', 'equalto', 'saved')|list) %}
   <form method="post" action="{{ url_for('grades_propose', filename=report_file) }}" class="inline-form">
     <input type="hidden" name="csrf" value="{{ csrf }}">
     <label>Out of <input type="number" name="max_points" min="1" step="any" required

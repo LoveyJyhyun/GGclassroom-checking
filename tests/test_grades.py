@@ -22,6 +22,8 @@ class FakeClassroom:
 
 def test_rounding():
     assert grades.round_to_step(7.25, 0.1) == 7.3
+    assert grades.round_to_step(4.35, 0.1) == 4.4 and grades.round_to_step(0.35, 0.1) == 0.4
+    assert grades.round_to_step(6.25, 0.1) == 6.3
     assert grades.round_to_step(7.249, 0.5) == 7.0
     assert grades.round_to_step(8.3333, 0.25) == 8.25
     assert grades.round_to_step(6.5, 1) == 7
@@ -41,6 +43,9 @@ def test_no_points_no_proposal(sample_report):
     sample_report["work"]["max_points"] = None
     with pytest.raises(ValueError):
         grades.propose(sample_report)
+    for bad in (float("inf"), float("nan"), -5):
+        with pytest.raises(ValueError):
+            grades.propose(sample_report, max_points=bad)
     assert grades.propose(sample_report, max_points=20)["rows"][0]["grade"] == 20
 
 
@@ -75,3 +80,19 @@ def test_storage_and_csv(tmp_path, sample_report):
     assert lines[0].startswith("Student,Email,Score %,Proposed grade,Out of,Hold")
     assert any(line.startswith("Trần Bình,binh@school.test,50.0,5.0,10,yes,x") for line in lines)
     assert any(line.startswith("Lê Chi,") and "nothing readable" in line for line in lines)
+
+
+def test_saved_grades_lock_the_proposal(tmp_path, sample_report):
+    path = str(tmp_path / "r.json")
+    p = grades.propose(sample_report)
+    grades.save(path, p)
+    grades.apply_reviewed(FakeClassroom(), path, p["revision"], {"a"})
+    locked = grades.load(path)
+    assert locked["status"] == grades.APPLIED and grades.is_locked(locked)
+    # Pressing Save again with nothing ticked keeps the record of what was saved.
+    locked = grades.apply_reviewed(FakeClassroom(), path, locked["revision"], set())
+    assert locked["status"] == grades.APPLIED
+    with pytest.raises(grades.ProposalLocked):
+        grades.replace(path, grades.propose(sample_report))
+    with pytest.raises(grades.StaleProposal):
+        grades.apply_reviewed(FakeClassroom(), path, "not-the-revision", {"b"})

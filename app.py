@@ -59,7 +59,9 @@ def _store(creds: Credentials) -> None:
         "token_uri": creds.token_uri,
         "client_id": creds.client_id,
         "client_secret": creds.client_secret,
-        "scopes": list(creds.scopes or SCOPES),
+        # What Google actually granted: on its consent screen the teacher may untick
+        # the grade permission, and the Save button must then not appear.
+        "scopes": list(getattr(creds, "granted_scopes", None) or creds.scopes or SCOPES),
     }
 
 
@@ -389,9 +391,13 @@ def _csrf_token() -> str:
     return session["csrf"]
 
 
+def _same_secret(sent: str, expected: str) -> bool:
+    # Bytes, because compare_digest rejects non-ASCII str with an error.
+    return bool(sent) and bool(expected) and hmac.compare_digest(sent.encode(), expected.encode())
+
+
 def _check_csrf() -> None:
-    sent = request.form.get("csrf", "")
-    if not sent or not hmac.compare_digest(sent, session.get("csrf", "")):
+    if not _same_secret(request.form.get("csrf", ""), session.get("csrf", "")):
         abort(400, "This form has expired. Reload the page and try again.")
 
 
@@ -416,7 +422,7 @@ def _follow_up(report: dict) -> list[dict]:
 def report_page(filename: str):
     report = _load_report(filename)
     path = _report_path(filename)
-    agent = triage.load_triage(path)
+    agent = triage.current_state(triage.load_triage(path), dify.DIFY_TIMEOUT)
     if agent and agent.get("text"):
         agent = {**agent, "text": triage.with_names(agent["text"], report)}
     return render_template("report.html", course=report.get("course") or {"id": report["course_id"]},
@@ -428,6 +434,13 @@ def report_page(filename: str):
                            can_write=_session_can_write(), dify_on=dify.configured(),
                            triage_names=lambda text: triage.with_names(text, report),
                            csrf=_csrf_token())
+
+
+@app.route("/report/<filename>/triage.json")
+def report_triage_state(filename: str):
+    _load_report(filename)
+    agent = triage.current_state(triage.load_triage(_report_path(filename)), dify.DIFY_TIMEOUT) or {}
+    return jsonify({"state": agent.get("state"), "updated_at": agent.get("updated_at")})
 
 
 @app.route("/report/<filename>/triage", methods=["POST"])
@@ -448,18 +461,15 @@ def grades_propose(filename: str):
     report = _load_report(filename)
     _check_csrf()
     path = _report_path(filename)
-    existing = grades.load(path)
-    if existing and existing.get("status") != grades.PENDING:
-        abort(400, "Draft grades were already saved for this report.")
     try:
         max_points = float(request.form.get("max_points") or 0) or None
     except ValueError:
         max_points = None
     # Keep any holds the agent asked for when the teacher re-proposes.
-    held = {r["uid"]: r["reason"] for r in (existing or {}).get("rows", []) if r["held"]}
+    held = {r["uid"]: r["reason"] for r in (grades.load(path) or {}).get("rows", []) if r["held"]}
     try:
-        grades.save(path, grades.propose(report, max_points, hold=held))
-    except ValueError as e:
+        grades.replace(path, grades.propose(report, max_points, hold=held))
+    except ValueError as e:                     # no usable points, or already saved
         abort(400, str(e))
     return redirect(url_for("report_page", filename=filename) + "#draft-grades")
 
@@ -471,12 +481,11 @@ def grades_apply(cr: Classroom, filename: str):
     _check_csrf()
     if not _session_can_write():
         abort(403, "Sign in with grade access (GRADE_WRITE=1) to save draft grades.")
-    path = _report_path(filename)
-    proposal = grades.load(path)
-    if not proposal:
-        abort(404)
-    approved = set(request.form.getlist("approve"))
-    grades.save(path, grades.apply(cr, proposal, approved))
+    try:
+        grades.apply_reviewed(cr, _report_path(filename), request.form.get("revision", ""),
+                              set(request.form.getlist("approve")))
+    except grades.StaleProposal as e:
+        abort(409, str(e))
     return redirect(url_for("report_page", filename=filename) + "#draft-grades")
 
 
@@ -505,13 +514,20 @@ def _agent_allowed() -> bool:
     # Header only: a token in the URL would end up in access logs.
     sent = request.headers.get("Authorization", "")
     sent = sent[7:].strip() if sent.lower().startswith("bearer ") else ""
-    return bool(sent) and hmac.compare_digest(sent, AGENT_TOKEN)
+    return _same_secret(sent, AGENT_TOKEN)
+
+
+def _unauthorized():
+    resp = jsonify(mcp.error_response(None, -32001, "Unauthorized"))
+    resp.status_code = 401
+    resp.headers["WWW-Authenticate"] = 'Bearer realm="ggclassroom-checker"'
+    return resp
 
 
 @app.route("/agent/mcp", methods=["GET", "POST", "DELETE"])
 def agent_mcp():
     if not _agent_allowed():
-        return jsonify(mcp.error_response(None, -32001, "Unauthorized")), 401
+        return _unauthorized()
     if request.method != "POST":
         # No server-to-client stream and no sessions to end: allowed by the spec.
         return Response(status=405, headers={"Allow": "POST"})
@@ -526,16 +542,14 @@ def agent_mcp():
         reply = mcp.error_response(msg_id, -32603, f"Internal error: {type(e).__name__}: {e}")
     if reply is None:
         return Response(status=202)
-    resp = jsonify(reply)
-    if isinstance(body, dict) and body.get("method") == "initialize":
-        resp.headers["Mcp-Session-Id"] = uuid.uuid4().hex     # stateless, but some clients log it
-    return resp
+    # No Mcp-Session-Id: without one, clients do not open a GET stream or send DELETE.
+    return jsonify(reply)
 
 
 @app.route("/agent/tools")
 def agent_tool_list():
     if not _agent_allowed():
-        abort(401)
+        return _unauthorized()
     return jsonify({"tools": mcp.tool_list()})
 
 
@@ -543,11 +557,11 @@ def agent_tool_list():
 def agent_tool_call(name: str):
     """The same tools as plain JSON, for curl, n8n or a Dify HTTP node."""
     if not _agent_allowed():
-        abort(401)
+        return _unauthorized()
     if name not in agent_tools.TOOLS:
         abort(404)
     try:
-        text, data = agent_tools.call(name, request.get_json(silent=True) or {})
+        text, data = agent_tools.call(name, request.get_json(silent=True))
     except agent_tools.ToolError as e:
         return jsonify({"error": str(e)}), 400
     return jsonify({"text": text, "data": data})

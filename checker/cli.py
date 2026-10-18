@@ -17,7 +17,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 from . import agent_tools, answerkey, checks, dify, llm, results, runner, triage
 from . import status as st
-from .classroom import SCOPES, Classroom
+from .classroom import READ_SCOPES as SCOPES, Classroom
 
 CLIENT_SECRETS = os.environ.get("GOOGLE_DESKTOP_CLIENT_SECRETS",
                                 os.environ.get("GOOGLE_CLIENT_SECRETS", "client_secret.json"))
@@ -269,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nFull report: {path}")
         print(f"Results CSV: {csv_path}")
         if dify.configured() and not args.no_triage:
-            return _run_agent(path, report)
+            _run_agent(path, report)              # a failed triage does not fail the check
     return 0
 
 
@@ -281,6 +281,8 @@ def _run_agent(path: str, report: dict) -> int:
     outcome = dify.run_triage(path)
     if outcome.get("state") != "done":
         print(f"! Triage failed: {outcome.get('error')}", file=sys.stderr)
+        print("  The workflow reads reports through the web app's /agent/mcp, so the app must be "
+              "running and use the same REPORTS_DIR as this command.", file=sys.stderr)
         return 1
     print("\n-- Agent triage --")
     print(triage.with_names(outcome.get("text", ""), report))

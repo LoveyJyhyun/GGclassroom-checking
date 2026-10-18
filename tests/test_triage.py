@@ -1,3 +1,5 @@
+import json
+
 from checker import triage
 
 
@@ -40,8 +42,9 @@ def test_the_brief_holds_no_names_or_emails(sample_report):
         local = s["email"].split("@")[0]
         if len(local) >= 3:                       # 2-letter tokens would hit ordinary words
             assert not re.search(rf"\b{local}\b", text)
-    assert '"S02 and S04 share identical sentences"' in text      # evidence kept, names scrubbed
-    assert "signed S04" in text
+    # Free text from earlier model calls can quote a submission: it never enters the brief.
+    assert "identical sentences" not in text and "generic tone" not in text
+    assert "1 piece(s) of evidence on the report page" in text
     assert text.startswith("# Triage brief: Lab 1")              # text, not JSON, for Dify
 
 
@@ -72,3 +75,65 @@ def test_triage_state_is_stored_next_to_the_report(tmp_path, sample_report):
     stored = triage.load_triage(path)
     assert stored["state"] == "done" and stored["hold"] == ["S04"] and stored["updated_at"]
     assert (tmp_path / "agent" / "20261013-130000_Lab-1_w1.triage.json").exists()
+
+
+def test_attachment_names_and_raw_errors_stay_out(sample_report):
+    sample_report["students"]["d"]["notes"] = ["NguyenVanAn_Lab1.pdf: PDF files are not read."]
+    sample_report["errors"] = ["The model answer could not be condensed: Model did not return valid JSON: 'An viết'"]
+    b = triage.brief(sample_report)
+    text = triage.brief_markdown(b) + json.dumps(b, ensure_ascii=False)
+    assert "NguyenVanAn" not in text and "An viết" not in text
+    s03 = next(p for p in b["students"] if p["code"] == "S03")
+    assert s03["signals"][0]["text"] == "1 attachment(s) not checked (.pdf)"
+    assert "- The model answer could not be condensed" in text
+
+
+def test_scrubbing_is_accent_blind_and_whole_word(sample_report):
+    import unicodedata
+    code_of = triage.codes(sample_report)
+    scrub = triage._scrubber(sample_report, code_of)
+    nfd = unicodedata.normalize("NFD", "Trần Bình")
+    assert scrub(f"from {nfd} and nguyen van an") == "from S04 and S02"
+    assert scrub("TRAN  BINH wrote") == "S04 wrote"
+    assert scrub("machine learning, chi phí") == "machine learning, chi phí"   # no partial words
+    assert scrub("mail chi@school.test") == "mail S01"
+
+
+def test_a_cleared_pair_with_strong_overlap_still_gets_a_look(sample_report):
+    sample_report["duplicates"][0]["llm"] = {"copied": False, "confidence": 85, "evidence": []}
+    levels = {s["level"] for p in triage.brief(sample_report)["students"]
+              for s in p["signals"] if s["kind"] == "copying"}
+    assert levels == {"medium"}                       # 62% shared wording
+
+
+def test_students_who_did_not_turn_in(sample_report):
+    sample_report["students"]["c"]["status"] = "missing"
+    s01 = next(p for p in triage.brief(sample_report)["students"] if p["code"] == "S01")
+    assert s01["tier"] == "ok" and s01["signals"][0]["kind"] == "missing"
+    from checker import grades
+    assert grades.propose(sample_report)["unmarked"][0]["why"] == "not turned in"
+
+
+def test_code_that_ran_is_not_reported_as_unrunnable(sample_report):
+    sample_report["code"]["results"]["a"].update(
+        error="Cannot reach Ollama", llm=None, tests=[{"passed": True}, {"passed": True}])
+    sigs = [s for p in triage.brief(sample_report)["students"] for s in p["signals"] if s["kind"] == "code"]
+    assert sigs == []
+    sample_report["code"]["results"]["a"].update(tests=[], passed=0, error="Docker is not running")
+    sigs = [s for p in triage.brief(sample_report)["students"] for s in p["signals"] if s["kind"] == "code"]
+    assert sigs and sigs[0]["text"].startswith("code could not be run")
+
+
+def test_a_run_interrupted_mid_triage_is_not_stuck(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+    assert triage.current_state({"state": "running", "updated_at": old}, 900)["state"] == "failed"
+    fresh = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    assert triage.current_state({"state": "running", "updated_at": fresh}, 900)["state"] == "running"
+
+
+def test_old_reports_without_scores_agree(sample_report):
+    from checker import grades
+    sample_report.pop("scores")
+    assert triage.brief(sample_report)["stats"]["scored"] == 3
+    assert len(grades.propose(sample_report)["rows"]) == 3

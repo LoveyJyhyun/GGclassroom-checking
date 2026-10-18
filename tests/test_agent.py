@@ -56,7 +56,9 @@ def test_agent_endpoints_are_off_without_a_token(client, monkeypatch):
 
 
 def test_token_is_required(reports, client):
-    assert rpc(client, "ping", token="wrong").status_code == 401
+    wrong = rpc(client, "ping", token="wrong")
+    assert wrong.status_code == 401 and wrong.headers["WWW-Authenticate"].startswith("Bearer")
+    assert rpc(client, "ping", token="sai-mật-khẩu").status_code == 401      # non-ASCII: no 500
     assert client.post("/agent/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 401
     # Never in the URL, where it would be logged.
     assert client.post(f"/agent/mcp?key={TOKEN}",
@@ -71,7 +73,8 @@ def test_initialize_negotiates_the_version(reports, client):
     assert result["protocolVersion"] == "2025-03-26"
     assert result["capabilities"] == {"tools": {"listChanged": False}}
     assert result["serverInfo"]["name"] == "ggclassroom-checker"
-    assert resp.headers["Mcp-Session-Id"]
+    # Stateless: no session id, so clients do not open a GET stream or send DELETE.
+    assert "Mcp-Session-Id" not in resp.headers
     unknown = rpc(client, "initialize", {"protocolVersion": "1999-01-01"}).get_json()["result"]
     assert unknown["protocolVersion"] == mcp.LATEST
 
@@ -84,6 +87,8 @@ def test_notifications_get_no_reply_and_there_is_no_stream(reports, client):
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 7, "method": "ping"}])
     assert batch.get_json() == [{"jsonrpc": "2.0", "id": 7, "result": {}}]
+    empty = client.post("/agent/mcp", headers={"Authorization": f"Bearer {TOKEN}"}, json=[])
+    assert empty.get_json()["error"]["code"] == mcp.INVALID_REQUEST
     assert rpc(client, "no/such").get_json()["error"]["code"] == mcp.METHOD_NOT_FOUND
 
 
@@ -147,11 +152,26 @@ def test_save_triage_stores_notes_and_proposes_held_grades(reports, client):
 def test_save_triage_never_overwrites_saved_grades(reports, client):
     path = str(reports / NEW)
     proposal = grades.propose(json.loads((reports / NEW).read_text()))
+    proposal["rows"][0]["result"] = "saved"
     proposal["status"] = grades.APPLIED
     grades.save(path, proposal)
     text = call(client, "save_triage", triage="notes", hold="S02")["content"][0]["text"]
     assert "already saved" in text
-    assert grades.load(path)["status"] == grades.APPLIED
+    kept = grades.load(path)
+    assert kept["rows"][0]["result"] == "saved" and kept["created_by"] == "teacher"
+
+
+def test_save_triage_keeps_the_teachers_proposal(reports, client, sample_report):
+    path = str(reports / NEW)
+    grades.save(path, grades.propose(sample_report, max_points=20))      # teacher: out of 20
+    before = grades.load(path)["revision"]
+    call(client, "save_triage", triage="notes", hold="S04")
+    merged = grades.load(path)
+    assert merged["max_points"] == 20 and merged["created_by"] == "teacher"
+    assert [r["uid"] for r in merged["rows"] if r["held"]] == ["b"]
+    assert merged["revision"] != before
+    call(client, "save_triage", triage="notes", hold="")                 # agent drops the hold
+    assert not any(r["held"] for r in grades.load(path)["rows"])
 
 
 def test_json_api_mirrors_the_tools(reports, client):
@@ -162,6 +182,9 @@ def test_json_api_mirrors_the_tools(reports, client):
     assert ok["text"].startswith("# Triage brief")
     bad = client.post("/agent/tools/student_detail", json={"student": "S99"}, headers=headers)
     assert bad.status_code == 400
+    assert client.post("/agent/tools/triage_brief", json=[1], headers=headers).status_code == 400
+    assert client.post("/agent/tools/triage_brief", json={"report": 5}, headers=headers).status_code == 400
+    assert client.post("/agent/tools/list_reports", json={"limit": "10.0"}, headers=headers).status_code == 200
     assert client.post("/agent/tools/nope", json={}, headers=headers).status_code == 404
 
 
@@ -201,16 +224,27 @@ def test_teacher_approves_and_saves_draft_grades(reports, client, monkeypatch):
                        data={"max_points": "20", "csrf": "c"}).status_code == 302
     assert grades.load(str(reports / NEW))["rows"][0]["grade"] == 20
 
-    resp = client.post(f"/report/{NEW}/grades/apply", data={"csrf": "c", "approve": ["a", "d"]})
+    revision = grades.load(str(reports / NEW))["revision"]
+    stale = client.post(f"/report/{NEW}/grades/apply", data={"csrf": "c", "revision": "old", "approve": ["a"]})
+    assert stale.status_code == 409 and GradingClassroom.saved == []
+    resp = client.post(f"/report/{NEW}/grades/apply",
+                       data={"csrf": "c", "revision": revision, "approve": ["a", "d"]})
     assert resp.status_code == 302
     assert sorted(GradingClassroom.saved) == [("sa", 20.0), ("sd", 20.0)]
     saved = grades.load(str(reports / NEW))
     assert saved["status"] == grades.APPLIED
     assert {r["uid"]: r["result"] for r in saved["rows"]} == {"a": "saved", "b": "skipped", "d": "saved"}
 
-    # Once saved, a new proposal from the agent or the page may not replace it.
+    # A later press with nothing ticked keeps what was saved, and the proposal stays locked.
+    revision = saved["revision"]
+    client.post(f"/report/{NEW}/grades/apply", data={"csrf": "c", "revision": revision})
+    again = grades.load(str(reports / NEW))
+    assert again["status"] == grades.APPLIED
+    assert {r["uid"]: r["result"] for r in again["rows"]}["a"] == "saved"
     assert client.post(f"/report/{NEW}/grades/propose",
                        data={"max_points": "10", "csrf": "c"}).status_code == 400
+    assert "already saved" in call(client, "save_triage", triage="x", hold="S02")["content"][0]["text"]
+    assert grades.load(str(reports / NEW))["rows"][0]["grade"] == 20
     csv_text = client.get(f"/report/{NEW}/grades.csv").data.decode("utf-8-sig")
     assert csv_text.splitlines()[0].startswith("Student,Email,Score %,Proposed grade")
 
@@ -252,6 +286,12 @@ class FakeDify(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"code": "unauthorized"}')
             return
+        if FakeDify.mode == "cut":             # odd lines, then the stream just ends
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b'data: [1, 2]\n\ndata: "x"\n\ndata: {"event": "node_started"}\n\n')
+            return
         if FakeDify.mode == "save":            # what the workflow does through MCP
             agent_tools.call("save_triage", {"report": body["inputs"]["report"],
                                              "triage": "S04: ask about the overlap.", "hold": "S04"})
@@ -290,6 +330,10 @@ def test_run_triage_records_the_outcome(reports, fake_dify):
 
     fake_dify.mode = "unauthorized"
     assert "Dify returned 401" in dify.run_triage(path)["error"]
+
+    fake_dify.mode = "cut"
+    cut = dify.run_triage(path)
+    assert cut["state"] == "failed" and "closed the stream" in cut["error"]
 
 
 def test_dify_unreachable(reports, monkeypatch):

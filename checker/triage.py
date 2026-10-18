@@ -4,17 +4,22 @@ Everything in this module is deterministic. The agent (a Dify workflow on a loca
 Qwen) only writes the narrative on top of it and suggests whose grade to hold, so
 the facts it works from are the same every time and come straight from the report.
 
-The agent never sees names, emails or answers. Each student becomes a stable code
-(S01, S02, ... in name order), and free text that came out of an earlier LLM call
-(copy evidence, review notes) is scrubbed of names and emails before it leaves.
-Even an agent wired to a cloud model by mistake would learn nothing about who the
-students are.
+The agent never sees names, emails or anything a student wrote. Each student becomes
+a stable code (S01, S02, ... in name order), and the brief is built from numbers and
+fixed wording only: free text from earlier LLM calls (copy evidence, review notes,
+error messages that may quote a submission) and attachment names are left out, because
+they can quote a student's work or name. The report page still shows all of it to the
+teacher. Even an agent wired to a cloud model by mistake would learn nothing about who
+the students are or what they wrote.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import tempfile
+import threading
+import unicodedata
 from datetime import datetime, timezone
 from statistics import mean, median
 
@@ -37,7 +42,6 @@ COPY_LLM_CONFIDENT = 70
 AI_HEURISTIC_MEDIUM, AI_HEURISTIC_INFO = 60, 40
 AI_LLM_MEDIUM, AI_LLM_INFO = 70, 50
 LOW_SCORE = 50.0
-EVIDENCE_CHARS = 160
 
 CODE_RE = re.compile(r"\bS\d{2,3}\b")
 
@@ -52,26 +56,54 @@ def codes(report: dict) -> dict[str, str]:
     return {uid: f"S{i:0{width}d}" for i, uid in enumerate(order, 1)}
 
 
+def _fold(text: str) -> tuple[str, list[int]]:
+    """Lower-case, accent-free copy of `text` and, per folded char, its index in `text`.
+
+    So "Nguyễn Văn An", "nguyen van an" and the NFD-encoded form all match each other.
+    """
+    out, where = [], []
+    for i, ch in enumerate(text):
+        if ch in "đĐ":
+            folded = "d"
+        else:
+            folded = "".join(c for c in unicodedata.normalize("NFD", ch)
+                             if not unicodedata.combining(c)).lower()
+        out.append(folded)
+        where += [i] * len(folded)
+    return "".join(out), where
+
+
 def _scrubber(report: dict, code_of: dict[str, str]):
-    """A function that replaces every student's name and email with their code."""
-    pairs = []
+    """A function that replaces every student's full name and email with their code.
+
+    Whole words only, so a name never eats into an ordinary word.
+    """
+    tokens = []
     for uid, s in (report.get("students") or {}).items():
-        for token in {s.get("name") or "", s.get("email") or "",
-                      (s.get("email") or "").split("@")[0]}:
-            if len(token) >= 3:
-                pairs.append((token, code_of[uid]))
-    pairs.sort(key=lambda p: -len(p[0]))         # "Nguyen Van An" before "An..."
-    patterns = [(re.compile(re.escape(t), re.IGNORECASE), c) for t, c in pairs]
+        for token in (s.get("name") or "", s.get("email") or ""):
+            folded = _fold(" ".join(token.split()))[0]
+            if len(folded) >= 3:
+                tokens.append((folded, code_of[uid]))
+    tokens.sort(key=lambda t: -len(t[0]))           # "nguyen van an" before "an ..."
+    patterns = [(re.compile(r"(?<!\w)" + re.escape(t).replace(r"\ ", r"\s+") + r"(?!\w)"), c)
+                for t, c in tokens]
 
     def scrub(text) -> str:
-        text = " ".join(str(text or "").split())
+        text = unicodedata.normalize("NFC", " ".join(str(text or "").split()))
         for pattern, code in patterns:
-            text = pattern.sub(code, text)
+            folded, where = _fold(text)
+            spans = [(where[m.start()], where[m.end() - 1] + 1) for m in pattern.finditer(folded)]
+            for start, end in reversed(spans):
+                text = text[:start] + code + text[end:]
         return text
     return scrub
 
 
-def _clip(text: str, limit: int = EVIDENCE_CHARS) -> str:
+def _scores(report: dict) -> dict:
+    return report.get("scores") or results.scores(report)
+
+
+def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
 
 
@@ -81,7 +113,7 @@ def _signal(level: str, kind: str, text: str) -> dict:
     return {"level": level, "kind": kind, "text": text}
 
 
-def _copy_signals(report: dict, uid: str, code_of: dict, scrub) -> list[dict]:
+def _copy_signals(report: dict, uid: str, code_of: dict) -> list[dict]:
     out = []
     for p in report.get("duplicates") or []:
         if uid not in (p["a"], p["b"]):
@@ -98,7 +130,8 @@ def _copy_signals(report: dict, uid: str, code_of: dict, scrub) -> list[dict]:
               or semantic >= COPY_SEMANTIC_MEDIUM or review.get("copied")):
             level = MEDIUM
         if review and not review.get("copied") and confidence >= COPY_LLM_CONFIDENT:
-            level = INFO                               # the reviewer looked and cleared it
+            # The reviewer looked and cleared it; strong shared wording still deserves a look.
+            level = MEDIUM if lexical >= COPY_LEXICAL_HIGH else INFO
         if level is None:
             continue
 
@@ -109,14 +142,13 @@ def _copy_signals(report: dict, uid: str, code_of: dict, scrub) -> list[dict]:
         if review:
             verdict = "likely copied" if review.get("copied") else "probably not copied"
             text += f"; reviewer: {verdict} ({confidence}%)"
-            evidence = [scrub(e) for e in review.get("evidence") or [] if str(e).strip()]
-            if evidence:
-                text += f' - "{_clip(evidence[0])}"'
+            if review.get("evidence"):
+                text += f", {len(review['evidence'])} piece(s) of evidence on the report page"
         out.append(_signal(level, "copying", text))
     return out
 
 
-def _ai_signal(report: dict, uid: str, scrub) -> dict | None:
+def _ai_signal(report: dict, uid: str) -> dict | None:
     r = (report.get("ai") or {}).get(uid)
     if not r:
         return None
@@ -129,22 +161,20 @@ def _ai_signal(report: dict, uid: str, scrub) -> dict | None:
         level = INFO
     else:
         return None
-    text = (f"AI-writing indicators (not proof): style {'n/a' if h is None else f'{h}%'}, "
-            f"model {'n/a' if likelihood is None else f'{likelihood}%'}")
-    reasons = [scrub(x) for x in llm_view.get("reasons") or [] if str(x).strip()]
-    if reasons:
-        text += f' - "{_clip(reasons[0])}"'
-    return _signal(level, "ai", text)
+    style = "n/a" if h is None else f"{h}%"
+    model = "n/a" if likelihood is None else f"{likelihood}%"
+    return _signal(level, "ai", f"AI-writing indicators (not proof): style {style}, model {model}")
 
 
-def _code_signal(report: dict, uid: str, scrub) -> dict | None:
+def _code_signal(report: dict, uid: str) -> dict | None:
     r = ((report.get("code") or {}).get("results") or {}).get(uid)
     if not r:
         return None
     review = r.get("llm") or {}
     passed, total = r.get("passed") or 0, r.get("total") or 0
-    if r.get("error"):
-        return _signal(MEDIUM, "code", f"code could not be checked: {_clip(scrub(r['error']))}")
+    if r.get("error") and not r.get("tests"):
+        # Nothing ran (no sandbox, ...). The error is the runner's own message.
+        return _signal(MEDIUM, "code", f"code could not be run: {_clip(str(r['error']), 120)}")
     if total and passed / total < 0.5:
         level = MEDIUM
     elif review and review.get("solves_task") is False:
@@ -154,8 +184,8 @@ def _code_signal(report: dict, uid: str, scrub) -> dict | None:
     else:
         return None
     text = f"code tests {passed}/{total} passed"
-    if review.get("summary"):
-        text += f"; reviewer: {_clip(scrub(review['summary']))}"
+    if review:
+        text += "; reviewer: " + ("solves the task" if review.get("solves_task") else "does not solve the task")
     return _signal(level, "code", text)
 
 
@@ -167,15 +197,17 @@ def _truncated(report: dict, uid: str) -> list[str]:
     return sorted(found)
 
 
-def student_signals(report: dict, uid: str, code_of: dict, scrub) -> list[dict]:
+def student_signals(report: dict, uid: str, code_of: dict) -> list[dict]:
     s = report["students"][uid]
     out: list[dict] = []
-    if not s.get("files"):
+    if s.get("status") not in st.DONE:
+        out.append(_signal(INFO, "missing", "has not turned in work"))
+    elif not s.get("files"):
         out.append(_signal(HIGH, "unreadable",
                            "nothing could be read, so the work is unmarked; ask for a readable "
                            "format (Google Doc, .docx, .py)"))
-    out += _copy_signals(report, uid, code_of, scrub)
-    sc = (report.get("scores") or {}).get(uid) or results.score(report, uid)
+    out += _copy_signals(report, uid, code_of)
+    sc = _scores(report).get(uid)
     if sc and sc["percent"] < LOW_SCORE:
         lost = [q for q, v in sorted(sc["per_question"].items()) if v < 0.999]
         out.append(_signal(MEDIUM, "score", f"low score {sc['percent']}%"
@@ -185,14 +217,16 @@ def student_signals(report: dict, uid: str, code_of: dict, scrub) -> list[dict]:
         out.append(_signal(MEDIUM, "truncated",
                            f"part of the work was cut to fit the model ({', '.join(trimmed)}); "
                            "check those marks by hand"))
-    for sig in (_ai_signal(report, uid, scrub), _code_signal(report, uid, scrub)):
+    for sig in (_ai_signal(report, uid), _code_signal(report, uid)):
         if sig:
             out.append(sig)
     if s.get("status") == st.LATE:
         out.append(_signal(INFO, "late", "turned in late"))
     if s.get("files") and s.get("notes"):
-        out.append(_signal(INFO, "files", f"{len(s['notes'])} attachment(s) not checked: "
-                                          + _clip(scrub("; ".join(s["notes"])))))
+        # File names can be the student's name, so only the kinds of file are given.
+        kinds = sorted({m.lower() for m in re.findall(r"\.([A-Za-z0-9]{1,5})\s*:", " ".join(s["notes"]))})
+        out.append(_signal(INFO, "files", f"{len(s['notes'])} attachment(s) not checked"
+                                          + (f" ({', '.join('.' + k for k in kinds)})" if kinds else "")))
     order = {HIGH: 0, MEDIUM: 1, INFO: 2}
     out.sort(key=lambda x: order[x["level"]])
     return out
@@ -206,7 +240,7 @@ def tier_of(signals: list[dict]) -> str:
 # --- The brief ---------------------------------------------------------------
 
 def _class_stats(report: dict) -> dict:
-    scores = [sc for sc in (report.get("scores") or {}).values() if sc]
+    scores = [sc for sc in _scores(report).values() if sc]
     percents = [sc["percent"] for sc in scores]
     per_q: dict[str, list[float]] = {}
     for sc in scores:
@@ -231,12 +265,12 @@ def _class_stats(report: dict) -> dict:
 def brief(report: dict, report_file: str = "") -> dict:
     """Everything the agent needs to triage a run, with students as codes only."""
     code_of = codes(report)
-    scrub = _scrubber(report, code_of)
+    scores = _scores(report)
     work = report.get("work") or {}
     people = []
     for uid, s in report.get("students", {}).items():
-        sigs = student_signals(report, uid, code_of, scrub)
-        sc = (report.get("scores") or {}).get(uid) or results.score(report, uid)
+        sigs = student_signals(report, uid, code_of)
+        sc = scores.get(uid)
         people.append({"code": code_of[uid], "tier": tier_of(sigs),
                        "score": sc["percent"] if sc else None,
                        "status": st.LABELS.get(s.get("status"), s.get("status") or ""),
@@ -259,7 +293,8 @@ def brief(report: dict, report_file: str = "") -> dict:
                     "can_save_draft_grades": work.get("associated_with_developer")},
         "stats": stats,
         "students": people,
-        "errors": [_clip(scrub(e), 240) for e in report.get("errors") or []],
+        # Only the kind of problem: the details can quote a submission or a model reply.
+        "errors": [_clip(str(e).split(":")[0], 100) for e in report.get("errors") or []],
     }
 
 
@@ -316,23 +351,24 @@ def student_detail(report: dict, code: str) -> dict | None:
         return None
     scrub = _scrubber(report, code_of)
     s = report["students"][uid]
-    sc = (report.get("scores") or {}).get(uid) or results.score(report, uid)
+    sc = _scores(report).get(uid)
     nums = ((report.get("numbers") or {}).get("results") or {}).get(uid) or {}
     rub = ((report.get("rubric") or {}).get("results") or {}).get(uid) or {}
     code_r = ((report.get("code") or {}).get("results") or {}).get(uid) or {}
     ai = (report.get("ai") or {}).get(uid) or {}
-    sigs = student_signals(report, uid, code_of, scrub)
+    sigs = student_signals(report, uid, code_of)
     return {
         "code": code_of[uid], "tier": tier_of(sigs),
         "status": st.LABELS.get(s.get("status"), s.get("status") or ""),
         "files": len(s.get("files") or []),
         "score": sc,
         "numeric": [{"question": r["question"], "ok": r["ok"]} for r in nums.get("results") or []],
+        # Missing points are the teacher's answer-key wording, not the student's.
         "written": [{"question": r["question"], "covered": len(r.get("covered") or []),
                      "total": r.get("total"), "missing": [scrub(m) for m in r.get("missing") or []]}
                     for r in rub.get("results") or []],
         "code_tests": {"passed": code_r.get("passed"), "total": code_r.get("total"),
-                       "issues": [scrub(i) for i in (code_r.get("llm") or {}).get("issues") or []]}
+                       "review_issues": len((code_r.get("llm") or {}).get("issues") or [])}
         if code_r else None,
         "ai_style_signals": [scrub(x) for x in (ai.get("heuristic") or {}).get("signals") or []],
         "signals": sigs,
@@ -358,15 +394,35 @@ def load_triage(report_path: str) -> dict | None:
         return None
 
 
+_WRITE_LOCK = threading.Lock()
+
+
 def write_triage(report_path: str, **fields) -> dict:
     """Merge fields into the stored triage state (state, text, hold, error ...)."""
-    data = load_triage(report_path) or {}
-    data.update(fields, updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
-    os.makedirs(_agent_dir(report_path), exist_ok=True)
-    tmp = triage_path(report_path) + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, triage_path(report_path))      # never leave a half-written file
+    with _WRITE_LOCK:
+        data = load_triage(report_path) or {}
+        data.update(fields, updated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+        os.makedirs(_agent_dir(report_path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=_agent_dir(report_path), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, triage_path(report_path))      # never leave a half-written file
+        return data
+
+
+def current_state(data: dict | None, timeout_s: float) -> dict | None:
+    """The stored triage, with a 'running' that outlived the timeout shown as failed.
+
+    A restart in the middle of a run would otherwise leave it running forever.
+    """
+    if not data or data.get("state") != "running":
+        return data
+    try:
+        started = datetime.fromisoformat(data["updated_at"])
+    except (KeyError, ValueError):
+        return {**data, "state": "failed", "error": "the triage run was interrupted"}
+    if (datetime.now(timezone.utc) - started).total_seconds() > timeout_s + 60:
+        return {**data, "state": "failed", "error": "the triage run was interrupted or timed out"}
     return data
 
 

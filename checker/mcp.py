@@ -39,8 +39,11 @@ def tool_list() -> list[dict]:
     return [{
         "name": t.name, "title": t.title, "description": t.description,
         "inputSchema": t.schema(),
+        # save_triage replaces earlier notes (destructive in MCP's sense) but the same
+        # call twice leaves the same result (idempotent).
         "annotations": {"title": t.title, "readOnlyHint": t.read_only,
-                        "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+                        "destructiveHint": not t.read_only, "idempotentHint": True,
+                        "openWorldHint": False},
     } for t in agent_tools.TOOLS.values()]
 
 
@@ -97,6 +100,8 @@ def handle(message) -> dict | None:
 def handle_body(body) -> list[dict] | dict | None:
     """A POST body may be one message or a batch; notifications get no reply."""
     if isinstance(body, list):
+        if not body:
+            return error_response(None, INVALID_REQUEST, "Empty batch")
         replies = [r for r in (handle(m) for m in body) if r is not None]
         return replies or None
     return handle(body)

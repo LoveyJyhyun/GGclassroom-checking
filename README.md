@@ -30,7 +30,7 @@ Every check run is saved as JSON in `reports/` so you can open it again later.
 | | How it works |
 |---|---|
 | **Follow-up list** | Every report opens with who to look at first: *Needs action* (likely copying, nothing readable), *Worth a look* (AI-writing indicators, failing code, low score, work cut short) and *No concerns*, each with the reason. Worked out in Python from the report, no LLM. |
-| **Triage agent** | A [Dify](https://dify.ai) workflow on your local Qwen reads that list after every run and writes short follow-up notes: what to do first, what the class missed, and a neutral message draft. It talks to the checker through an MCP server and only ever sees students as codes (S01, S02 …), never names, emails or answers. See [section 6](#6-triage-agent-dify--mcp). |
+| **Triage agent** | A [Dify](https://dify.ai) workflow on your local Qwen reads that list after every run and writes short follow-up notes: what to do first, what the class missed, and a neutral message draft. It talks to the checker through an MCP server and only ever sees students as codes (S01, S02 …) with their numbers and signals: never names, emails, file names or anything a student wrote. See [section 6](#6-triage-agent-dify--mcp). |
 | **Draft grades** | Score × the assignment's points, proposed for the class. The agent may suggest holding some (a likely copy); you tick which ones to save and press the button. Nothing is written to Classroom without that. |
 
 ## 1. Google Cloud setup (one time)
@@ -217,16 +217,18 @@ check run ──► report ──► Dify workflow ──MCP──► triage_bri
 **What the agent can and cannot do.** Its tools are `list_reports`, `triage_brief`,
 `student_detail`, `grade_proposal` (read only) and `save_triage` (stores its notes and
 proposes grades). None of them reaches Google: saving grades happens only when you press
-the button on the report page, in your own session. The brief contains codes, scores and
-signals, never names, emails or student answers, and names in quoted evidence are
-replaced with codes too. Keep the model local anyway: the workflow ships set to
-`qwen3:30B` on Ollama.
+the button on the report page, in your own session, and once any grade is saved the
+agent can no longer change that proposal. The brief contains codes, scores and signals
+in fixed wording. Text from earlier model calls (copy evidence, review notes) and
+attachment names are left out because they can quote a student's work or name; the
+report page still shows them to you. Keep the model local anyway: the workflow ships
+set to `qwen3:30B` on Ollama.
 
 **Set it up (once)**
 
 1. In the checker's `.env`, set a long random `AGENT_TOKEN` (e.g. `openssl rand -hex 32`).
-   Running the checker with `python app.py`? Also set `HOST=0.0.0.0`, so Dify's containers
-   can reach it.
+   Running the checker with `python app.py`? Also set `HOST=0.0.0.0` (so Dify's containers
+   can reach it) and `FLASK_DEBUG=0` (the debugger must never be reachable from the network).
 2. Dify blocks requests to your own computer by default. In **Dify's** `docker/.env` add
    `SSRF_PROXY_ALLOW_PRIVATE_DOMAINS=host.docker.internal`, then `docker compose up -d`
    in Dify's `docker/` folder.
@@ -250,7 +252,9 @@ python -m checker.cli triage                     # the follow-up list for the ne
 python -m checker.cli triage --report <file> --agent    # and the agent's notes
 ```
 
-`check` triages automatically when `DIFY_TRIAGE_KEY` is set (`--no-triage` to skip).
+`check` triages automatically when `DIFY_TRIAGE_KEY` is set (`--no-triage` to skip). The
+workflow reads reports through the web app, so the app must be running and use the same
+`REPORTS_DIR` as the command line (in Docker, run the CLI inside the container).
 
 The same tools work from any MCP client, for example a Dify chat agent where you ask
 "which students in Lab 3 should I talk to?", or Claude Code
@@ -262,7 +266,8 @@ Without MCP, `POST /agent/tools/<name>` with a JSON body and the same header doe
 The **Draft grades** section of a report proposes score × points for every marked
 student (unreadable work gets no proposal). Untick anyone you are not sure about, press
 **Save ticked draft grades to Classroom**, and each student's result is shown next to
-their name. Draft grades are visible only to you until you return the work in Classroom.
+their name. If the agent changed the proposal after you opened the page, the save is
+refused and you are asked to look again, so only numbers you have seen are written. Draft grades are visible only to you until you return the work in Classroom.
 
 Saving needs two things:
 

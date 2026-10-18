@@ -78,7 +78,10 @@ def report_url(path: str) -> str:
 # --- Tool handlers -------------------------------------------------------------
 
 def list_reports(limit: int = 10, assignment: str = "") -> tuple[str, dict]:
-    limit = max(1, min(int(limit or 10), 50))
+    try:
+        limit = max(1, min(int(float(limit or 10)), 50))
+    except (TypeError, ValueError):
+        raise ToolError("limit must be a number.") from None
     found = []
     for name in report_files():
         path = os.path.join(checks.REPORTS_DIR, name)
@@ -129,22 +132,30 @@ def save_triage(report: str, triage_text: str, hold: str = "") -> tuple[str, dic
 
     note = "No draft grades proposed: this run has no scores."
     proposal_info: dict = {}
-    if any((r.get("scores") or {}).values()):
-        existing = grades.load(path)
-        max_points = (r.get("work") or {}).get("max_points")
-        if existing and existing.get("status") != grades.PENDING:
-            note = "Draft grades were already saved by the teacher, so the proposal was left as it is."
-        elif not max_points:
-            note = "No draft grades proposed: the assignment has no point value."
-        else:
-            # The reason shown to the teacher comes from the report, not from the agent.
-            b = triage.brief(r)
-            code_to_uid = {c: u for u, c in triage.codes(r).items()}
-            first_signal = {p["code"]: p["signals"][0]["text"] for p in b["students"] if p["signals"]}
-            held = {code_to_uid[c]: "held by the agent: " + first_signal.get(c, "see the triage")
-                    for c in hold_codes}
-            proposal = grades.propose(r, hold=held, created_by="agent")
-            grades.save(path, proposal)
+    if any(grades.scores_of(r).values()):
+        # The reason the teacher sees comes from the report, not from the agent.
+        b = triage.brief(r)
+        code_to_uid = {c: u for u, c in triage.codes(r).items()}
+        first_signal = {p["code"]: p["signals"][0]["text"] for p in b["students"] if p["signals"]}
+        held = {code_to_uid[c]: grades.AGENT_HOLD + first_signal.get(c, "see the triage")
+                for c in hold_codes}
+        with grades.lock_for(path):
+            existing = grades.load(path)
+            if grades.is_locked(existing):
+                proposal = None
+                note = "Draft grades were already saved by the teacher, so the proposal was left as it is."
+            elif existing:
+                # Keep the teacher's points and choices; only update the agent's holds.
+                proposal = grades.merge_agent_holds(existing, held)
+                grades.save(path, proposal)
+            else:
+                try:
+                    proposal = grades.propose(r, hold=held, created_by="agent")
+                    grades.save(path, proposal)
+                except ValueError:
+                    proposal = None
+                    note = "No draft grades proposed: the assignment has no point value."
+        if proposal:
             proposal_info = {"proposed": len(proposal["rows"]), "held": hold_codes,
                              "can_save_to_classroom": proposal["can_save"]}
             note = (f"Draft grades proposed for {len(proposal['rows'])} students"
@@ -189,9 +200,10 @@ TOOLS: dict[str, Tool] = {t.name: t for t in [
           "student": {"type": "string", "description": "Student code from triage_brief, e.g. S03."}},
          ("student",), student_detail),
     Tool("save_triage", "Save the triage for the teacher",
-         "Store your triage notes on the report page and propose draft grades from the scores. "
-         "List in 'hold' the codes whose grade the teacher should check before saving it (e.g. likely "
-         "copying, work cut short). This does not change anything in Google Classroom.",
+         "Store your triage notes on the report page (replacing earlier notes) and propose draft "
+         "grades from the scores. List in 'hold' the codes whose grade the teacher should check before "
+         "saving it (e.g. likely copying, work cut short). This does not change anything in Google "
+         "Classroom, and never touches grades the teacher has already saved.",
          {"report": REPORT_PARAM,
           "triage": {"type": "string", "description": "Your triage in Markdown. Refer to students by code only."},
           "hold": {"type": "string", "description": "Codes to hold back, e.g. 'S03, S07'. Empty for none."}},
@@ -206,10 +218,18 @@ TOOLS: dict[str, Tool] = {t.name: t for t in [
 def call(name: str, arguments: dict | None) -> tuple[str, dict]:
     """Run one tool. Raises KeyError for an unknown tool, ToolError for bad input."""
     tool = TOOLS[name]
+    if arguments is not None and not isinstance(arguments, dict):
+        raise ToolError("Arguments must be a JSON object.")
     args = dict(arguments or {})
     unknown = set(args) - set(tool.params)
     if unknown:
         raise ToolError(f"Unknown argument(s): {', '.join(sorted(unknown))}.")
+    for key, value in args.items():
+        kind = tool.params[key]["type"]
+        if kind == "string" and value is not None and not isinstance(value, str):
+            raise ToolError(f"{key} must be a string.")
+        if kind == "integer" and isinstance(value, (bool, dict, list)):
+            raise ToolError(f"{key} must be a number.")
     missing = [p for p in tool.required if not str(args.get(p) or "").strip()]
     if missing:
         raise ToolError(f"Missing argument(s): {', '.join(missing)}.")

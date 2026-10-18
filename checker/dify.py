@@ -52,6 +52,8 @@ def run_workflow(inputs: dict, key: str | None = None, timeout: float | None = N
                     event = json.loads(line[5:])
                 except ValueError:
                     continue
+                if not isinstance(event, dict):
+                    continue
                 if event.get("event") == "workflow_finished":
                     return event.get("data") or {}
                 if event.get("event") == "error":
@@ -72,6 +74,9 @@ def run_triage(report_path: str) -> dict:
                                  "language": TRIAGE_LANGUAGE})
     except DifyError as e:
         return triage.write_triage(report_path, state="failed", error=str(e))
+    except Exception as e:                        # noqa: BLE001 - e.g. a stream cut mid-chunk
+        return triage.write_triage(report_path, state="failed",
+                                   error=f"Lost the connection to Dify: {type(e).__name__}: {e}")
 
     stored = triage.load_triage(report_path) or {}
     if stored.get("state") == "done":                 # save_triage was called by the workflow

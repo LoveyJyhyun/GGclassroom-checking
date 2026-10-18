@@ -25,6 +25,10 @@ SCOPES = [
 ]
 
 
+# The command line never writes grades, so it keeps asking for view-only access.
+READ_SCOPES = [COURSEWORK_READ if scope == COURSEWORK_WRITE else scope for scope in SCOPES]
+
+
 def can_write_grades(scopes) -> bool:
     """Whether a signed-in session was granted the draft-grade permission."""
     return COURSEWORK_WRITE in (scopes or [])
